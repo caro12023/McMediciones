@@ -1,291 +1,295 @@
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-from supabase import create_client, Client
 from datetime import datetime
 import io
 
 # ==========================================
-# CONFIGURACIÓN Y ELIMINACIÓN DE BARRA LATERAL
+# 1. CONFIGURACIÓN Y ESTÉTICA
 # ==========================================
-st.set_page_config(page_title="McMediciones", layout="wide", page_icon="🍔")
+st.set_page_config(page_title="McMediciones Pro", layout="wide", page_icon="🍔")
 
-# Ocultar la barra lateral nativa para una vista más limpia en celular
 st.markdown("""
     <style>
-        [data-testid="collapsedControl"] {display: none;}
-        [data-testid="stSidebar"] {display: none;}
+    .stApp { background-color: #f8fafc; }
+    div[data-testid="stVerticalBlock"] > div[style*="border"] { 
+        border-radius: 12px; border: 1px solid #cbd5e1; background-color: white; box-shadow: 0 1px 2px rgba(0,0,0,0.05); 
+    }
+    .pill-red { background-color: #fee2e2; color: #b91c1c; padding: 4px 12px; border-radius: 9999px; font-size: 12px; font-weight: bold; }
+    .pill-yellow { background-color: #fef3c7; color: #b45309; padding: 4px 12px; border-radius: 9999px; font-size: 12px; font-weight: bold; }
+    .pill-black { background-color: #e2e8f0; color: #0f172a; padding: 4px 12px; border-radius: 9999px; font-size: 12px; font-weight: bold; }
+    .pill-blue { background-color: #eff6ff; color: #1d4ed8; padding: 4px 12px; border-radius: 9999px; font-size: 12px; font-weight: bold; }
+    .pill-green { background-color: #ecfdf5; color: #047857; padding: 4px 12px; border-radius: 9999px; font-size: 12px; font-weight: bold; }
+    [data-testid="collapsedControl"] {display: none;}
+    [data-testid="stSidebar"] {display: none;}
     </style>
 """, unsafe_allow_html=True)
 
 MC_COLORS = {'Caja': '#DA291C', 'AutoMac': '#FFC72C', 'Delivery/Pickup': '#27251F'}
 
-@st.cache_resource
-def init_connection() -> Client:
-    try: 
-        return create_client(st.secrets["SUPABASE_URL"], st.secrets["SUPABASE_KEY"])
-    except Exception as e: 
-        return None
-
-supabase = init_connection()
-
-# Variables de estado (Memoria temporal de la app)
+# ==========================================
+# 2. MEMORIA DEL SISTEMA (TODO EN TIEMPO REAL)
+# ==========================================
 if 'configurado' not in st.session_state: st.session_state.configurado = False
-if 'cronos_e2e' not in st.session_state: st.session_state.cronos_e2e = {}
-if 'cronos_est' not in st.session_state: st.session_state.cronos_est = {}
+if 'orders' not in st.session_state: st.session_state.orders = []
+if 'stations' not in st.session_state: st.session_state.stations = []
+if 'arrivals' not in st.session_state: st.session_state.arrivals = []
+if 'capacity' not in st.session_state: st.session_state.capacity = []
+if 'events' not in st.session_state: st.session_state.events = []
+if 'queues' not in st.session_state: st.session_state.queues = []
 
 # ==========================================
-# 1. PANTALLA DE INICIO (LOGIN)
+# 3. PANTALLA DE INICIO
 # ==========================================
 if not st.session_state.configurado:
-    st.title("🍔 McMediciones")
-    st.markdown("### Configuración de Turno")
+    st.title("🍔 McMediciones Pro")
+    st.write("Sistema de Medición en Tiempo Real.")
     
     with st.container(border=True):
-        obs = st.text_input("👤 Tu Nombre (Observador)", placeholder="Ej: Caro")
-        dia = st.date_input("📅 Fecha")
+        obs = st.text_input("👤 Tu Nombre (Observador)")
+        dia = st.date_input("📅 Fecha de Medición")
         franja = st.selectbox("⏱️ Franja de Medición", ["10:30–12:30", "11:30–14:00", "18:00–21:00", "Otra"])
         
-        if st.button("🚀 Iniciar Trabajo de Campo", use_container_width=True):
+        if st.button("▶ INICIAR TRABAJO DE CAMPO", type="primary", use_container_width=True):
             if obs:
                 st.session_state.obs = obs
-                st.session_state.franja_oficial = f"{dia} | {franja}"
+                st.session_state.franja = f"{dia} | {franja}"
                 st.session_state.configurado = True
                 st.rerun()
             else:
-                st.error("⚠️ Por favor, ingresa tu nombre para continuar.")
+                st.error("⚠️ Ingresa tu nombre.")
     st.stop()
 
 # ==========================================
-# 2. ENCABEZADO Y NAVEGACIÓN PRINCIPAL
+# 4. NAVEGACIÓN Y TABS
 # ==========================================
-c_info, c_salir = st.columns([3, 1])
-c_info.caption(f"👤 **{st.session_state.obs}** | ⏱️ {st.session_state.franja_oficial}")
-
-if c_salir.button("Cerrar Sesión"):
-    st.session_state.configurado = False
-    st.session_state.cronos_e2e = {}
-    st.session_state.cronos_est = {}
+c_info, c_salir = st.columns([4, 1])
+c_info.markdown(f"**Observador:** {st.session_state.obs} | **Franja:** {st.session_state.franja}")
+if c_salir.button("🛑 Cerrar Sesión", use_container_width=True):
+    st.session_state.clear()
     st.rerun()
 
-st.markdown("### Selecciona el área a medir:")
-tab_fo, tab_int, tab_dash = st.tabs([
-    "🚶‍♂️ 1. Registro de Pedidos", 
-    "🛠️ 2. Operación Interna", 
-    "📊 3. Dashboard y Exportar"
-])
+tab_pedidos, tab_interna, tab_dash = st.tabs(["🚶‍♂️ 1. Registro de Pedidos", "🛠️ 2. Operación Interna", "📊 3. Dashboard y Exportar"])
 
 # ---------------------------------------------------------
-# TAB 1: REGISTRO DE PEDIDOS (Llegadas, E2E y Delivery)
+# TAB 1: PEDIDOS (EL NUEVO FLUJO MULTITAREA)
 # ---------------------------------------------------------
-with tab_fo:
+with tab_pedidos:
     
-    # I. Colas
+    # 1. Registro Rápido (Llegadas y Colas 5m)
     with st.container(border=True):
-        st.subheader("🚨 I. Colas (Alarma 5 min)")
-        qc1, qc2 = st.columns(2)
-        cola_caja_int = qc1.number_input("Fila Caja (Personas)", min_value=0, key="qcaja")
-        cola_auto_int = qc2.number_input("Fila AutoMac (Carros)", min_value=0, key="qauto")
-        if st.button("💾 Guardar Colas", use_container_width=True):
-            if supabase: 
-                supabase.table("interval_queues").insert({"franja": st.session_state.franja_oficial, "cola_caja": cola_caja_int, "cola_automac": cola_auto_int, "timestamp": datetime.now().isoformat(), "observer_name": st.session_state.obs}).execute()
-            st.success("¡Colas registradas!")
-
-    # II. Llegadas Rápidas
-    with st.container(border=True):
-        st.subheader("👥 II. Llegadas Rápidas (+1)")
-        lc1, lc2, lc3 = st.columns(3)
-        if lc1.button("🚶‍♂️ +1 Caja", use_container_width=True):
-            if supabase: supabase.table("arrivals").insert({"franja": st.session_state.franja_oficial, "channel": "Caja", "timestamp": datetime.now().isoformat(), "observer_name": st.session_state.obs}).execute()
-        if lc2.button("🚗 +1 AutoMac", use_container_width=True):
-            if supabase: supabase.table("arrivals").insert({"franja": st.session_state.franja_oficial, "channel": "AutoMac", "timestamp": datetime.now().isoformat(), "observer_name": st.session_state.obs}).execute()
-        if lc3.button("🛵 +1 Delivery", use_container_width=True):
-            if supabase: supabase.table("arrivals").insert({"franja": st.session_state.franja_oficial, "channel": "Delivery/Pickup", "timestamp": datetime.now().isoformat(), "observer_name": st.session_state.obs}).execute()
-
-    # III. Tiempos de Pedido
-    with st.container(border=True):
-        st.subheader("⏱️ III. Medir Tiempo de Pedido")
-        c1, c2 = st.columns(2)
-        nuevo_canal = c1.selectbox("Canal a medir:", ["Caja", "AutoMac", "Delivery/Pickup"])
-        nuevo_items = c2.number_input("Cantidad de Ítems (Tamaño):", min_value=1, value=1)
+        st.subheader("🚨 Controles Rápidos (Colas y Llegadas)")
+        c1, c2, c3, c4 = st.columns(4)
+        if c1.button("🚶‍♂️ +1 Caja (Llegada)", use_container_width=True): st.session_state.arrivals.append({"Canal": "Caja", "Timestamp": datetime.now()})
+        if c2.button("🚗 +1 AutoMac (Llegada)", use_container_width=True): st.session_state.arrivals.append({"Canal": "AutoMac", "Timestamp": datetime.now()})
+        if c3.button("🛵 +1 Delivery (Llegada)", use_container_width=True): st.session_state.arrivals.append({"Canal": "Delivery/Pickup", "Timestamp": datetime.now()})
         
-        if st.button("▶️ Iniciar Reloj", use_container_width=True, type="primary"):
-            pid = f"ORD-{datetime.now().strftime('%H%M%S')}"
-            st.session_state.cronos_e2e[pid] = {"canal": nuevo_canal, "items": nuevo_items, "inicio": datetime.now()}
+        with c4.popover("📝 Registrar Colas (5min)"):
+            qc = st.number_input("Fila Caja", 0)
+            qa = st.number_input("Fila AutoMac", 0)
+            if st.button("Guardar"):
+                st.session_state.queues.append({"Hora": datetime.now().strftime("%H:%M:%S"), "Caja": qc, "AutoMac": qa})
+                st.rerun()
+
+    # 2. Creación de Pedido
+    with st.container(border=True):
+        st.subheader("➕ Nuevo Pedido a Medir")
+        c1, c2, c3 = st.columns([2, 1, 1])
+        n_canal = c1.selectbox("Canal:", ["Caja", "AutoMac", "Delivery/Pickup"], label_visibility="collapsed")
+        n_items = c2.number_input("Items (Tamaño):", min_value=1, value=1, label_visibility="collapsed")
+        if c3.button("▶ Iniciar Pedido", type="primary", use_container_width=True):
+            pid = f"P-{len(st.session_state.orders) + 1:03d}"
+            st.session_state.orders.append({
+                'ID': pid, 'Canal': n_canal, 'Items': n_items, 'Estado': 'Ordering',
+                'Inicio': datetime.now(), 'Fin_Orden': None, 'Fin_Espera': None,
+                'Cola_Salida': None, 'Obs': None
+            })
             st.rerun()
 
-        st.divider()
-        if st.button("🔄 Actualizar Relojes Activos", use_container_width=True): 
-            st.rerun()
+    st.write("---")
+    if st.button("🔄 Actualizar Relojes", use_container_width=True): st.rerun()
+
+    # 3. TABLEROS EN VIVO (Ordering -> Waiting)
+    col_ord, col_wait = st.columns(2)
+    
+    # Columna 1: TOMANDO PEDIDO
+    with col_ord:
+        st.markdown("### 📝 Tomando Pedido (Ordering)")
+        pedidos_ordering = [p for p in st.session_state.orders if p['Estado'] == 'Ordering']
+        if not pedidos_ordering: st.info("No hay pedidos en esta fase.")
         
-        for pid, p in list(st.session_state.cronos_e2e.items()):
-            with st.expander(f"⏳ {p['canal']} ({p['items']} ítems) - Inició: {p['inicio'].strftime('%H:%M:%S')}", expanded=True):
-                t_trans = int((datetime.now() - p['inicio']).total_seconds())
-                st.write(f"Tiempo corriendo: **{t_trans} segundos**")
+        for p in pedidos_ordering:
+            with st.container(border=True):
+                t_ord = int((datetime.now() - p['Inicio']).total_seconds())
+                pill = "pill-red" if p['Canal'] == "Caja" else "pill-yellow" if p['Canal'] == "AutoMac" else "pill-black"
+                st.markdown(f"**{p['ID']}** | <span class='{pill}'>{p['Canal']}</span> ({p['Items']} items)", unsafe_allow_html=True)
+                st.write(f"⏱️ Tiempo pidiendo: **{t_ord}s**")
                 
-                if p['canal'] in ["Caja", "AutoMac"]:
-                    cola_fin = st.number_input("Cola al salir:", min_value=0, key=f"cf_{pid}")
-                    obs_final = "N/A"
-                else:
-                    cola_fin = 0
-                    obs_final = st.selectbox("Observación de espera:", ["Ninguna", "Domiciliario tarde", "Congestión local"], key=f"ob_{pid}")
-
-                if st.button("🛑 Finalizar Pedido", key=f"btn_{pid}"):
-                    dur = int((datetime.now() - p['inicio']).total_seconds())
-                    if supabase: 
-                        supabase.table("tracked_orders").insert({"franja": st.session_state.franja_oficial, "channel": p['canal'], "size": "N/A", "items_count": p['items'], "cola_inicio": 0, "cola_fin": cola_fin, "observaciones": obs_final, "duration_seconds": dur, "start_time": p['inicio'].isoformat(), "observer_name": st.session_state.obs}).execute()
-                    del st.session_state.cronos_e2e[pid]
+                if st.button("▶ Pasar a Espera", key=f"mw_{p['ID']}", use_container_width=True):
+                    p['Estado'] = 'Waiting'
+                    p['Fin_Orden'] = datetime.now()
                     st.rerun()
 
-    # Tabla en vivo: Pedidos
-    st.divider()
-    st.subheader("📋 Registro en Vivo (Pedidos y Observaciones)")
-    if supabase:
-        df_live = pd.DataFrame(supabase.table('tracked_orders').select('*').eq('franja', st.session_state.franja_oficial).execute().data)
-        if not df_live.empty:
-            df_live['Hora Inicio'] = pd.to_datetime(df_live['start_time']).dt.strftime('%H:%M:%S')
-            df_live['Hora Fin'] = (pd.to_datetime(df_live['start_time']) + pd.to_timedelta(df_live['duration_seconds'], unit='s')).dt.strftime('%H:%M:%S')
-            df_live['Duración (seg)'] = df_live['duration_seconds']
-            df_live['Canal'] = df_live['channel']
-            df_live['Items'] = df_live['items_count']
-            df_live['Obs/Espera'] = df_live['observaciones']
-            df_live['Cola Salida'] = df_live['cola_fin']
-            
-            columnas_mostrar = ['Hora Inicio', 'Hora Fin', 'Canal', 'Items', 'Duración (seg)', 'Cola Salida', 'Obs/Espera']
-            st.dataframe(df_live[columnas_mostrar].sort_index(ascending=False), use_container_width=True)
-        else:
-            st.info("Aún no hay pedidos guardados en esta sesión.")
+    # Columna 2: EN ESPERA
+    with col_wait:
+        st.markdown("### ⏳ En Espera (Waiting)")
+        pedidos_waiting = [p for p in st.session_state.orders if p['Estado'] == 'Waiting']
+        if not pedidos_waiting: st.info("No hay pedidos esperando.")
+        
+        for p in pedidos_waiting:
+            with st.container(border=True):
+                t_tot = int((datetime.now() - p['Inicio']).total_seconds())
+                t_wait = int((datetime.now() - p['Fin_Orden']).total_seconds())
+                pill = "pill-red" if p['Canal'] == "Caja" else "pill-yellow" if p['Canal'] == "AutoMac" else "pill-black"
+                
+                st.markdown(f"**{p['ID']}** | <span class='{pill}'>{p['Canal']}</span> ({p['Items']} items)", unsafe_allow_html=True)
+                st.write(f"⏱️ Total: **{t_tot}s** | Esperando: **{t_wait}s**")
+                
+                if p['Canal'] in ["Caja", "AutoMac"]:
+                    cola_fin = st.number_input("Cola al salir:", 0, key=f"cf_{p['ID']}")
+                    obs = "N/A"
+                else:
+                    cola_fin = 0
+                    obs = st.selectbox("Obs:", ["Ninguna", "Domiciliario tarde", "Congestión"], key=f"ob_{p['ID']}")
+
+                if st.button("✅ Entregar y Finalizar", key=f"mf_{p['ID']}", type="primary", use_container_width=True):
+                    p['Estado'] = 'Completed'
+                    p['Fin_Espera'] = datetime.now()
+                    p['Cola_Salida'] = cola_fin
+                    p['Obs'] = obs
+                    st.rerun()
+
+    # 4. TABLA EN VIVO DE PEDIDOS
+    st.write("---")
+    st.subheader("📋 Pedidos Finalizados")
+    pedidos_completos = [p for p in st.session_state.orders if p['Estado'] == 'Completed']
+    if pedidos_completos:
+        datos_tabla = []
+        for p in pedidos_completos:
+            t_ord = int((p['Fin_Orden'] - p['Inicio']).total_seconds())
+            t_wait = int((p['Fin_Espera'] - p['Fin_Orden']).total_seconds())
+            t_tot = int((p['Fin_Espera'] - p['Inicio']).total_seconds())
+            datos_tabla.append({
+                "ID": p['ID'], "Canal": p['Canal'], "Items": p['Items'],
+                "T. Orden(s)": t_ord, "T. Espera(s)": t_wait, "T. Total(s)": t_tot,
+                "Cola Salida": p['Cola_Salida'], "Obs": p['Obs']
+            })
+        st.dataframe(pd.DataFrame(datos_tabla).iloc[::-1], use_container_width=True)
+    else:
+        st.info("Aún no has finalizado ningún pedido.")
 
 # ---------------------------------------------------------
 # TAB 2: OPERACIÓN INTERNA
 # ---------------------------------------------------------
-with tab_int:
+with tab_interna:
     
-    # IV. Estaciones
+    # 1. Estaciones
     with st.container(border=True):
-        st.subheader("IV. Tiempos por Estación (Submuestra)")
-        sc1, sc2 = st.columns(2)
-        s_nom = sc1.selectbox("Estación observada:", ["Ensamble", "Bebidas/Postres", "Staging/Bolseo", "Parrilla", "Freidoras"])
-        s_est = sc2.selectbox("Estado del componente:", ["Hecho a pedido", "Listo (Ya preparado)"])
-        
-        if st.button("▶️ Iniciar Reloj Estación", use_container_width=True):
-            sid = f"EST-{datetime.now().strftime('%H%M%S')}"
-            st.session_state.cronos_est[sid] = {"est": s_nom, "estado": s_est, "inicio": datetime.now()}
+        st.subheader("🍳 IV. Tiempos por Estación")
+        sc1, sc2, sc3 = st.columns([2, 2, 1])
+        s_nom = sc1.selectbox("Estación:", ["Ensamble", "Bebidas/Postres", "Staging/Bolseo", "Parrilla", "Freidoras"])
+        s_est = sc2.selectbox("Estado:", ["Hecho a pedido", "Listo (Ya preparado)"])
+        if sc3.button("▶ Iniciar", type="primary", use_container_width=True):
+            sid = f"E-{len(st.session_state.stations) + 1:03d}"
+            st.session_state.stations.append({'ID': sid, 'Estación': s_nom, 'Estado': s_est, 'Fase': 'Corriendo', 'Inicio': datetime.now()})
             st.rerun()
 
-        for sid, s in list(st.session_state.cronos_est.items()):
-            with st.expander(f"🍳 {s['est']} ({s['estado']})", expanded=True):
-                nota_espera = st.text_input("Nota breve si hay espera visible:", key=f"nesp_{sid}")
-                if st.button("🛑 Finalizar Estación", key=f"fbtn_{sid}"):
-                    dur = int((datetime.now() - s['inicio']).total_seconds())
-                    if supabase: 
-                        supabase.table("station_observations").insert({"franja": st.session_state.franja_oficial, "station": s['est'], "component_state": s['estado'], "nota_espera": nota_espera, "duration_seconds": dur, "start_time": s['inicio'].isoformat(), "observer_name": st.session_state.obs}).execute()
-                    del st.session_state.cronos_est[sid]
+        est_activas = [e for e in st.session_state.stations if e['Fase'] == 'Corriendo']
+        for e in est_activas:
+            with st.container(border=True):
+                ec1, ec2, ec3 = st.columns([2, 2, 1])
+                t_seg = int((datetime.now() - e['Inicio']).total_seconds())
+                ec1.markdown(f"**{e['ID']}** | {e['Estación']} | <span class='pill-blue'>Corriendo: {t_seg}s</span>", unsafe_allow_html=True)
+                nota = ec2.text_input("Nota breve:", key=f"nt_{e['ID']}")
+                if ec3.button("🛑 Fin", key=f"fb_{e['ID']}"):
+                    e['Fase'] = 'Completed'
+                    e['Fin'] = datetime.now()
+                    e['Duración (s)'] = int((e['Fin'] - e['Inicio']).total_seconds())
+                    e['Nota'] = nota
                     st.rerun()
-        
-        if supabase:
-            df_est_live = pd.DataFrame(supabase.table('station_observations').select('*').eq('franja', st.session_state.franja_oficial).execute().data)
-            if not df_est_live.empty:
-                st.markdown("**📋 Observaciones de Estaciones guardadas:**")
-                df_est_live['Inicio'] = pd.to_datetime(df_est_live['start_time']).dt.strftime('%H:%M:%S')
-                df_est_live.rename(columns={'station': 'Estación', 'component_state': 'Estado', 'duration_seconds': 'Duración(s)', 'nota_espera': 'Nota'}, inplace=True)
-                st.dataframe(df_est_live[['Inicio', 'Estación', 'Estado', 'Duración(s)', 'Nota']].sort_index(ascending=False), use_container_width=True)
 
-    # V. Capacidad
-    with st.container(border=True):
-        st.subheader("👥 V. Capacidad Efectiva")
-        momento = st.selectbox("Momento del registro:", ["Inicio de Franja", "Pico de Congestión"])
-        zonas = ["Parrilla", "Freidoras", "Ensamble", "Bebidas/Postres", "Staging/Bolseo", "Entrega"]
-        cap_data = {}
-        for z in zonas:
-            zc1, zc2 = st.columns(2)
-            cap_data[f"{z}_p"] = zc1.number_input(f"Pers. en {z}", min_value=0, key=f"p_{z}")
-            cap_data[f"{z}_e"] = zc2.number_input(f"Equipos {z}", min_value=0, key=f"e_{z}")
-        
-        if st.button("💾 Guardar Capacidad", use_container_width=True):
-            if supabase: 
-                supabase.table("capacity").insert({"franja": st.session_state.franja_oficial, "momento": momento, "datos": cap_data, "timestamp": datetime.now().isoformat(), "observer_name": st.session_state.obs}).execute()
-            st.success("¡Capacidad guardada!")
+        est_fin = [e for e in st.session_state.stations if e['Fase'] == 'Completed']
+        if est_fin:
+            st.markdown("**📋 Estaciones Finalizadas:**")
+            df_e = pd.DataFrame(est_fin)[['Estación', 'Estado', 'Duración (s)', 'Nota']]
+            st.dataframe(df_e.iloc[::-1], use_container_width=True)
 
-        if supabase:
-            df_cap_live = pd.DataFrame(supabase.table('capacity').select('*').eq('franja', st.session_state.franja_oficial).execute().data)
-            if not df_cap_live.empty:
-                st.markdown("**📋 Registros de Capacidad guardados:**")
-                df_cap_live['Hora'] = pd.to_datetime(df_cap_live['timestamp']).dt.strftime('%H:%M:%S')
-                df_cap_live.rename(columns={'momento': 'Momento'}, inplace=True)
-                st.dataframe(df_cap_live[['Hora', 'Momento']].sort_index(ascending=False), use_container_width=True)
+    # 2. Capacidad y Eventos
+    c_cap, c_ev = st.columns(2)
+    with c_cap:
+        with st.container(border=True):
+            st.subheader("👥 V. Capacidad Efectiva")
+            momento = st.selectbox("Momento:", ["Inicio de Franja", "Pico de Congestión"])
+            z_p, z_e = st.columns(2)
+            p_val = z_p.number_input("Personas Activas", 0)
+            e_val = z_e.number_input("Equipos Activos", 0)
+            if st.button("Guardar Capacidad", use_container_width=True):
+                st.session_state.capacity.append({"Hora": datetime.now().strftime('%H:%M:%S'), "Momento": momento, "Pers": p_val, "Eqps": e_val})
+                st.rerun()
+            if st.session_state.capacity: st.dataframe(pd.DataFrame(st.session_state.capacity).iloc[::-1], use_container_width=True)
 
-    # VI. Eventos
-    with st.container(border=True):
-        st.subheader("⚠️ VI. Registro de Eventos")
-        evento = st.text_input("Describe el evento (falla, limpieza, etc.):")
-        if st.button("📝 Guardar Evento", use_container_width=True):
-            if supabase and evento: 
-                supabase.table("events").insert({"franja": st.session_state.franja_oficial, "descripcion": evento, "timestamp": datetime.now().isoformat(), "observer_name": st.session_state.obs}).execute()
-            st.success("Evento guardado.")
-
-        if supabase:
-            df_ev_live = pd.DataFrame(supabase.table('events').select('*').eq('franja', st.session_state.franja_oficial).execute().data)
-            if not df_ev_live.empty:
-                st.markdown("**📋 Historial de Eventos:**")
-                df_ev_live['Hora'] = pd.to_datetime(df_ev_live['timestamp']).dt.strftime('%H:%M:%S')
-                df_ev_live.rename(columns={'descripcion': 'Evento'}, inplace=True)
-                st.dataframe(df_ev_live[['Hora', 'Evento']].sort_index(ascending=False), use_container_width=True)
+    with c_ev:
+        with st.container(border=True):
+            st.subheader("⚠️ VI. Registro de Eventos")
+            evento = st.text_input("Descripción (falla, reposición...):")
+            if st.button("Guardar Evento", use_container_width=True):
+                st.session_state.events.append({"Hora": datetime.now().strftime('%H:%M:%S'), "Evento": evento})
+                st.rerun()
+            if st.session_state.events: st.dataframe(pd.DataFrame(st.session_state.events).iloc[::-1], use_container_width=True)
 
 # ---------------------------------------------------------
-# TAB 3: DASHBOARD Y REPORTES OFICIALES
+# TAB 3: DASHBOARD Y EXPORTAR (TODO INTEGRADO)
 # ---------------------------------------------------------
 with tab_dash:
-    st.header("📈 Centro de Análisis y Reportes")
+    st.header("📈 Dashboard y Exportación")
     
-    if st.button("🔄 Traer Datos Nuevos de la Nube", type="primary", use_container_width=True):
-        st.rerun()
+    # Demanda 5 min
+    if st.session_state.arrivals:
+        df_arr = pd.DataFrame(st.session_state.arrivals)
+        dem_5m = df_arr.groupby([pd.Grouper(key='Timestamp', freq='5min'), 'Canal']).size().reset_index(name='Pedidos')
+        
+        st.subheader("Curva de Demanda (Intervalos 5 min)")
+        fig = px.line(dem_5m, x='Timestamp', y='Pedidos', color='Canal', markers=True, color_discrete_map=MC_COLORS)
+        st.plotly_chart(fig, use_container_width=True)
+        
+        resumen = dem_5m.pivot(index='Timestamp', columns='Canal', values='Pedidos').fillna(0).astype(int)
+        resumen['Total Intervalo'] = resumen.sum(axis=1)
+        total_franja = resumen.sum().to_frame().T
+        total_franja.index = ['TOTAL FRANJA']
+        resumen_final = pd.concat([resumen, total_franja])
+        st.dataframe(resumen_final, use_container_width=True)
+    else:
+        st.info("Registra llegadas (+1) en la pestaña 1 para ver la curva de demanda.")
 
-    if supabase:
-        df_arr = pd.DataFrame(supabase.table('arrivals').select('*').eq('franja', st.session_state.franja_oficial).execute().data)
-        df_ord = pd.DataFrame(supabase.table('tracked_orders').select('*').eq('franja', st.session_state.franja_oficial).execute().data)
-        df_est = pd.DataFrame(supabase.table('station_observations').select('*').eq('franja', st.session_state.franja_oficial).execute().data)
-
-        if df_arr.empty and df_ord.empty:
-            st.warning("Aún no hay datos para procesar las gráficas.")
-        else:
-            st.subheader("Curva de Demanda por Canal (Intervalos 5 min)")
-            if not df_arr.empty:
-                df_arr['timestamp'] = pd.to_datetime(df_arr['timestamp']).dt.tz_localize(None)
-                dem_5m = df_arr.groupby([pd.Grouper(key='timestamp', freq='5min'), 'channel']).size().reset_index(name='pedidos')
-                fig = px.line(dem_5m, x='timestamp', y='pedidos', color='channel', markers=True, color_discrete_map=MC_COLORS)
-                st.plotly_chart(fig, use_container_width=True)
-                
-                resumen = dem_5m.pivot(index='timestamp', columns='channel', values='pedidos').fillna(0).astype(int)
-                resumen['Total Intervalo'] = resumen.sum(axis=1)
-                total_franja = resumen.sum().to_frame().T
-                total_franja.index = ['TOTAL FRANJA']
-                resumen_final = pd.concat([resumen, total_franja])
-                st.dataframe(resumen_final, use_container_width=True)
-
-            st.subheader("Parámetros Estadísticos por Estación")
-            params = pd.DataFrame()
-            if not df_est.empty:
-                params = df_est.groupby(['station', 'component_state']).agg(
-                    n=('duration_seconds', 'count'), mediana=('duration_seconds', 'median'),
-                    Mínimo=('duration_seconds', 'min'), Máximo=('duration_seconds', 'max'),
-                    P10=('duration_seconds', lambda x: x.quantile(0.10)), P90=('duration_seconds', lambda x: x.quantile(0.90))
-                ).reset_index()
-                params.rename(columns={'station': 'Estación', 'component_state': 'Estado/Tipo'}, inplace=True)
-                st.dataframe(params.round(1), use_container_width=True)
-
-            st.divider()
-            st.subheader("📂 Reporte Completo de la Sesión")
-            output = io.BytesIO()
-            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                if 'resumen_final' in locals(): resumen_final.to_excel(writer, sheet_name='Demanda_Curva')
-                if not df_ord.empty: df_ord.to_excel(writer, sheet_name='Pedidos_E2E_Delivery', index=False)
-                if not params.empty: params.to_excel(writer, sheet_name='Estaciones_Resumen', index=False)
+    st.write("---")
+    
+    # BOTÓN MAESTRO DE EXCEL
+    st.subheader("📂 Descargar Toda la Sesión")
+    
+    if st.button("Preparar Excel Maestro", type="primary"):
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            # 1. Llegadas
+            if st.session_state.arrivals:
+                resumen_final.to_excel(writer, sheet_name='Demanda_5min')
+                pd.DataFrame(st.session_state.arrivals).to_excel(writer, sheet_name='Llegadas_Crudas', index=False)
             
-            st.download_button(
-                label="📥 Descargar Reporte Completo (Excel Maestro)", 
-                data=output.getvalue(), 
-                file_name="McMediciones_Reporte_Maestro.xlsx", 
-                use_container_width=True, 
-                type="primary"
-            )
+            # 2. Pedidos End-to-End
+            if pedidos_completos: pd.DataFrame(datos_tabla).to_excel(writer, sheet_name='Pedidos_E2E', index=False)
+            
+            # 3. Estaciones
+            est_fin = [e for e in st.session_state.stations if e['Fase'] == 'Completed']
+            if est_fin: pd.DataFrame(est_fin).drop(columns=['Fase', 'Inicio', 'Fin']).to_excel(writer, sheet_name='Estaciones', index=False)
+            
+            # 4. Extras
+            if st.session_state.capacity: pd.DataFrame(st.session_state.capacity).to_excel(writer, sheet_name='Capacidad', index=False)
+            if st.session_state.events: pd.DataFrame(st.session_state.events).to_excel(writer, sheet_name='Eventos', index=False)
+            if st.session_state.queues: pd.DataFrame(st.session_state.queues).to_excel(writer, sheet_name='Colas_Globales', index=False)
+            
+        st.download_button(
+            label="📥 HAZ CLIC AQUÍ PARA DESCARGAR EL REPORTE FINAL (EXCEL)", 
+            data=output.getvalue(), 
+            file_name=f"McMediciones_Final_{datetime.now().strftime('%H%M')}.xlsx", 
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True
+        )
