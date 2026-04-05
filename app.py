@@ -9,7 +9,7 @@ import pickle
 import os
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="McMediciones Oficial", layout="wide", page_icon="🍟")
+st.set_page_config(page_title="McMediciones Pro", layout="wide", page_icon="🍟")
 BOGOTA_TZ = pytz.timezone('America/Bogota')
 HISTORY_FILE = "mcmediciones_history.pkl"
 MC_COLORS = {'Caja': '#DA291C', 'AutoMac': '#FFC72C', 'Delivery/Pickup': '#27251F'}
@@ -26,7 +26,7 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- MEMORIA ---
+# --- MANEJO DE MEMORIA ---
 def load_history():
     if os.path.exists(HISTORY_FILE):
         try:
@@ -41,7 +41,7 @@ if 'history' not in st.session_state: st.session_state.history = load_history()
 if 'active_session' not in st.session_state: st.session_state.active_session = None 
 if 'selected_history' not in st.session_state: st.session_state.selected_history = None
 
-# Variables vivas
+# Variables de trabajo
 for key in ['orders', 'queues', 'stations', 'capacity', 'events']:
     if key not in st.session_state: st.session_state[key] = []
 if 'order_counter' not in st.session_state: st.session_state.order_counter = 1
@@ -75,13 +75,12 @@ def export_excel_maestro(session_data, session_info):
     return output.getvalue()
 
 def render_main_view(data, mode="vivo"):
-    # ALERTA INTELIGENTE (No se quita hasta que guardes el intervalo actual)
     if mode == "vivo":
         now = datetime.now(BOGOTA_TZ)
-        intervalo_actual = (now.replace(second=0, microsecond=0) - timedelta(minutes=now.minute % 5)).strftime("%H:%M")
-        ya_guardado = any(q.get('Intervalo') == intervalo_actual for q in st.session_state.queues)
-        if now.minute % 5 >= 0 and not ya_guardado: # Muestra alerta si estamos en el bloque y no hay dato
-            st.markdown(f'<div class="alerta-colas">🚨 REGISTRA LA COLA: Franja {intervalo_actual} 🚨</div>', unsafe_allow_html=True)
+        int_id = (now.replace(second=0, microsecond=0) - timedelta(minutes=now.minute % 5)).strftime("%H:%M")
+        ya = any(q.get('Intervalo') == int_id for q in st.session_state.queues)
+        if now.minute % 5 == 0 and not ya:
+            st.markdown(f'<div class="alerta-colas">🚨 REGISTRA LA COLA: Franja {int_id} 🚨</div>', unsafe_allow_html=True)
 
     t1, t2, t3, t4 = st.tabs(["🏃‍♂️ 1. Pedidos y Colas", "🍳 2. Estaciones (Submuestra)", "👥 3. Capacidad Efectiva", "📊 4. Dashboard"])
     
@@ -89,10 +88,10 @@ def render_main_view(data, mode="vivo"):
         with st.container(border=True):
             st.subheader("🚨 Registrar Colas")
             c_qc, c_qa, c_qb = st.columns([1, 1, 1])
-            qc = c_qc.number_input("Caja", 0); qa = c_qa.number_input("AutoMac", 0)
+            qc = c_qc.number_input("Fila Caja", 0); qa = c_qa.number_input("Fila AutoMac", 0)
             if c_qb.button("💾 Guardar Cola", use_container_width=True):
-                inter = (datetime.now(BOGOTA_TZ).replace(second=0, microsecond=0) - timedelta(minutes=datetime.now(BOGOTA_TZ).minute % 5)).strftime("%H:%M")
-                st.session_state.queues.append({"Hora": datetime.now(BOGOTA_TZ).strftime("%H:%M:%S"), "Intervalo": inter, "Caja": qc, "AutoMac": qa})
+                franja_str = (datetime.now(BOGOTA_TZ).replace(second=0, microsecond=0) - timedelta(minutes=datetime.now(BOGOTA_TZ).minute % 5)).strftime("%H:%M")
+                st.session_state.queues.append({"Hora": datetime.now(BOGOTA_TZ).strftime("%H:%M:%S"), "Intervalo": franja_str, "Caja": qc, "AutoMac": qa})
                 st.rerun()
             if data['queues']: st.dataframe(pd.DataFrame(data['queues']).iloc[::-1], use_container_width=True)
 
@@ -121,14 +120,14 @@ def render_main_view(data, mode="vivo"):
                         p['Estado'] = 'Completado'; p['Entrega'] = datetime.now(BOGOTA_TZ).strftime("%H:%M:%S"); p['Total(s)'] = round(time.time() - p['Inicio_ts'], 2); st.rerun()
 
             if data['orders']:
-                df_o = pd.DataFrame(data['orders'])
-                comp = df_o[df_o['Estado'] == 'Completado']
-                if not comp.empty: st.write("**Últimos Pedidos:**"); st.dataframe(comp[['ID', 'Canal', 'Total(s)']].iloc[::-1], use_container_width=True)
+                df_ord = pd.DataFrame(data['orders'])
+                comp = df_ord[df_ord['Estado'] == 'Completado']
+                if not comp.empty: st.write("**Log de Pedidos:**"); st.dataframe(comp[['ID', 'Canal', 'Total(s)']].iloc[::-1], use_container_width=True)
 
     with t2:
         with st.container(border=True):
-            st.subheader("🍳 Estaciones (10-15 muestras)")
-            st.info("Listo = Carne estaba en el bin. A pedido = Empleado esperó lote.")
+            st.subheader("🍳 Estaciones (Prioritarias)")
+            st.info("Mide cuánto tarda un empleado. Listo = El ingrediente ya estaba en el bin.")
             ic1, ic2, ic3 = st.columns([2,2,1])
             s_n = ic1.selectbox("Estación:", ["Ensamble", "Bebidas/Postres", "Staging/Bolseo"])
             s_e = ic2.selectbox("Estado:", ["Listo (En bin)", "A pedido (Esperó lote)"])
@@ -138,7 +137,7 @@ def render_main_view(data, mode="vivo"):
             for e in [e for e in st.session_state.stations if e['Fase'] == 'Corriendo']:
                 with st.container(border=True):
                     st.write(f"**{e['ID']}** - {e['Estación']} - ⏱️ {time.time()-e['Inicio_ts']:.2f}s")
-                    nt = st.text_input("Nota (ej. falta queso):", key=f"n_{e['ID']}")
+                    nt = st.text_input("Nota breve:", key=f"n_{e['ID']}")
                     if st.button("🛑 Terminar", key=f"ef_{e['ID']}", use_container_width=True):
                         e['Fase'] = 'Completado'; e['Fin'] = datetime.now(BOGOTA_TZ).strftime('%H:%M:%S'); e['Duración(s)'] = round(time.time()-e['Inicio_ts'], 2); e['Nota'] = nt; st.rerun()
             if data['stations']:
@@ -149,8 +148,8 @@ def render_main_view(data, mode="vivo"):
         with st.container(border=True):
             st.subheader("👥 Capacidad Efectiva")
             st.info("Registrar al INICIO y en el PICO de congestión.")
-            momento = st.radio("Fase:", ["Inicio de Franja", "Pico de Congestión"], horizontal=True)
-            st.write("**Personas por Zona:**")
+            momento = st.radio("Momento:", ["Inicio de Franja", "Pico de Congestión"], horizontal=True)
+            st.write("**Personas visibles por zona:**")
             c1, c2, c3 = st.columns(3); c4, c5, c6 = st.columns(3)
             p1 = c1.number_input("Parrilla", 0); p2 = c2.number_input("Freidoras", 0); p3 = c3.number_input("Ensamble", 0)
             p4 = c4.number_input("Bebidas", 0); p5 = c5.number_input("Bolseo", 0); p6 = c6.number_input("Entrega", 0)
@@ -173,38 +172,52 @@ def render_main_view(data, mode="vivo"):
                 fig_df = resumen.reset_index()
                 fig_df['Franja'] = fig_df['Timestamp'].apply(lambda t: f"{t.strftime('%H:%M')} - {(t + timedelta(minutes=5)).strftime('%H:%M')}")
                 
-                # --- ESCUDO TOTAL CONTRA VALUEERROR ---
                 try:
                     cols_ok = [c for c in ['Caja', 'AutoMac', 'Delivery/Pickup'] if c in resumen.columns]
                     if cols_ok:
                         fig = px.bar(fig_df.melt(id_vars='Franja', value_vars=cols_ok), x='Franja', y='value', color='variable', color_discrete_map=MC_COLORS, barmode='stack', text_auto=True)
                         st.plotly_chart(fig, use_container_width=True)
-                except: st.warning("Esperando más datos para la gráfica...")
+                except: st.warning("Procesando datos para la gráfica...")
                 
                 resumen['Total'] = resumen.sum(axis=1)
                 resumen.index = [f"{t.strftime('%H:%M')} - {(t + timedelta(minutes=5)).strftime('%H:%M')}" for t in resumen.index]
                 st.write("**Tabla de Demanda:**"); st.dataframe(resumen, use_container_width=True)
-        else: st.info("Sin pedidos aún.")
+        else: st.info("Registra pedidos para ver estadísticas.")
 
 # --- FLUJO ---
-if st.session_state.active_session is None:
+if st.session_state.selected_history:
+    s = st.session_state.selected_history
+    if st.button("⬅️ VOLVER", type="primary"): st.session_state.selected_history = None; st.rerun()
+    st.title(f"📂 Sesión: {s['info']['franja']}")
+    render_main_view(s['data'], mode="consulta")
+    st.download_button("📥 Excel", export_excel_maestro(s['data'], s['info']), f"Reporte_{int(time.time())}.xlsx", use_container_width=True)
+
+elif st.session_state.active_session is None:
     st.title("🍔 McMediciones Pro")
     c1, c2 = st.columns([1, 1.2])
     with c1:
         st.subheader("Nueva Medición")
         obs_n = st.text_input("Observador")
+        obs_f = st.date_input("Fecha de Inicio", datetime.now(BOGOTA_TZ).date())
         franj = st.selectbox("Franja", ["10:30–12:30", "11:30–14:00", "18:00–21:00", "Otra"])
         if st.button("▶ EMPEZAR", type="primary", use_container_width=True):
             if obs_n:
-                st.session_state.active_session = {"franja": franj, "observer": obs_n}
+                st.session_state.active_session = {"franja": franj, "observer": obs_n, "fecha": str(obs_f)}
                 st.rerun()
     with c2:
         st.subheader("Historial")
         if st.session_state.history:
             for s in reversed(st.session_state.history):
                 with st.container(border=True):
-                    st.write(f"**{s['info']['franja']}** | {s['info']['observer']}")
-                    st.download_button("💾 Excel", export_excel_maestro(s['data'], s['info']), f"Data_{int(time.time())}.xlsx", key=f"ex_{int(time.time())}")
+                    st.write(f"**{s['info'].get('fecha', 'S/F')} | {s['info']['franja']}** | {s['info']['observer']}")
+                    b1, b2, b3 = st.columns(3)
+                    with b1: st.download_button("💾 Excel", export_excel_maestro(s['data'], s['info']), f"Data_{int(time.time())}.xlsx", key=f"ex_{int(time.time())}", use_container_width=True)
+                    with b2: 
+                        if st.button("📊 Ver", key=f"v_{int(time.time())}", use_container_width=True): st.session_state.selected_history = s; st.rerun()
+                    with b3:
+                        if st.button("🗑️", key=f"del_{int(time.time())}", use_container_width=True):
+                            st.session_state.history = [h for h in st.session_state.history if h['info'] != s['info']]; save_history(); st.rerun()
+        else: st.info("Sin sesiones previas.")
 
 else:
     h1, h2 = st.columns([4, 1])
@@ -213,3 +226,5 @@ else:
         st.session_state.history.append({"info": st.session_state.active_session, "data": {'orders': list(st.session_state.orders), 'queues': list(st.session_state.queues), 'stations': list(st.session_state.stations), 'capacity': list(st.session_state.capacity)}})
         st.session_state.active_session = None; save_history(); st.rerun()
     render_main_view({'orders': st.session_state.orders, 'queues': st.session_state.queues, 'stations': st.session_state.stations, 'capacity': st.session_state.capacity}, mode="vivo")
+    st.divider()
+    st.download_button("📥 Excel Actual", export_excel_maestro({'orders': st.session_state.orders, 'queues': st.session_state.queues, 'stations': st.session_state.stations, 'capacity': st.session_state.capacity}, st.session_state.active_session), "Reporte_Actual.xlsx", use_container_width=True)
