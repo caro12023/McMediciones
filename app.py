@@ -40,15 +40,27 @@ if 'history' not in st.session_state: st.session_state.history = load_history()
 if 'active_session' not in st.session_state: st.session_state.active_session = None 
 
 # Inicializar variables
-for key in ['orders', 'queues', 'stations', 'capacity']:
+for key in ['orders', 'queues', 'stations', 'capacity', 'events']:
     if key not in st.session_state: st.session_state[key] = []
 if 'order_counter' not in st.session_state: st.session_state.order_counter = 1
+if 'session_start_time' not in st.session_state: st.session_state.session_start_time = None
 
 # --- FUNCIONES DE APOYO ---
+def get_interval_label(timestamp, start_time):
+    """Calcula el bloque de 5min relativo al inicio real de la toma de datos"""
+    if not start_time: return "00:00 - 00:05"
+    diff = timestamp - start_time
+    intervals_passed = int(diff.total_seconds() // 300)
+    franja_start = start_time + timedelta(minutes=intervals_passed * 5)
+    franja_end = franja_start + timedelta(minutes=5)
+    return f"{franja_start.strftime('%H:%M')} - {franja_end.strftime('%H:%M')}"
+
 def clean_df(df):
+    """Limpia columnas técnicas para la vista del usuario y Excel"""
     if df is None or df.empty: return pd.DataFrame()
     df = df.copy()
-    if 'Inicio_ts' in df.columns: df = df.drop(columns=['Inicio_ts'])
+    for c in ['Inicio_ts', 'Inicio_dt', 'Fase']:
+        if c in df.columns: df = df.drop(columns=[c])
     for col in df.columns:
         if pd.api.types.is_datetime64_any_dtype(df[col]):
             df[col] = df[col].dt.tz_localize(None)
@@ -56,56 +68,59 @@ def clean_df(df):
 
 def export_excel_maestro(session_data, session_info):
     output = io.BytesIO()
+    start_dt = session_info.get('start_dt')
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        # 1. Pestaña Demanda
+        # Pestaña 1: Pedidos por Intervalos (Resumen)
         if session_data.get('orders'):
             df_ord = pd.DataFrame(session_data['orders'])
-            df_arr = df_ord[['Canal', 'Inicio']].copy()
-            df_arr['Timestamp'] = pd.to_datetime(df_arr['Inicio'])
-            dem_5m = df_arr.groupby([pd.Grouper(key='Timestamp', freq='5min'), 'Canal']).size().reset_index(name='Pedidos')
-            resumen = dem_5m.pivot(index='Timestamp', columns='Canal', values='Pedidos').fillna(0).astype(int)
-            resumen['Total Intervalo'] = resumen.sum(axis=1)
-            resumen.index = resumen.index.astype(str)
-            resumen.to_excel(writer, sheet_name='Demanda_Franjas')
+            df_ord['Franja'] = df_ord['Inicio_dt'].apply(lambda x: get_interval_label(x, start_dt))
+            ped_int = df_ord.groupby(['Franja', 'Canal']).size().unstack(fill_value=0)
+            ped_int['Total Intervalo'] = ped_int.sum(axis=1)
+            ped_int.to_excel(writer, sheet_name='Pedidos_Intervalos')
             
-            # 2. Pestaña Detalle Pedidos (End-to-End)
-            detail = clean_df(df_ord)
-            detail.to_excel(writer, sheet_name='Detalle_E2E', index=False)
-
-        # 3. Pestaña Estaciones
+            # Pestaña 2: Detalle E2E (Cada pedido individual)
+            clean_df(df_ord).to_excel(writer, sheet_name='Detalle_E2E', index=False)
+        
+        # Pestaña 3: Colas por Intervalos
+        if session_data.get('queues'):
+            pd.DataFrame(session_data['queues']).to_excel(writer, sheet_name='Colas_Intervalos', index=False)
+        
+        # Pestaña 4: Estaciones (Submuestra)
         if session_data.get('stations'):
             clean_df(pd.DataFrame(session_data['stations'])).to_excel(writer, sheet_name='Estaciones', index=False)
         
-        # 4. Pestaña Colas
-        if session_data.get('queues'):
-            pd.DataFrame(session_data['queues']).to_excel(writer, sheet_name='Colas_5min', index=False)
-        
-        # 5. Pestaña Capacidad
+        # Pestaña 5: Capacidad Efectiva
         if session_data.get('capacity'):
-            pd.DataFrame(session_data['capacity']).to_excel(writer, sheet_name='Capacidad_Efectiva', index=False)
+            pd.DataFrame(session_data['capacity']).to_excel(writer, sheet_name='Capacidad_Franja', index=False)
+            
+        # Pestaña 6: Eventos
+        if session_data.get('events'):
+            pd.DataFrame(session_data['events']).to_excel(writer, sheet_name='Eventos', index=False)
             
     return output.getvalue()
 
 def render_main_view(data, mode="vivo"):
-    # ALERTA DE COLA
-    if mode == "vivo":
+    start_dt = st.session_state.session_start_time
+    
+    # ALERTA DE COLA (Relativa al inicio real)
+    if mode == "vivo" and start_dt:
         now = datetime.now(BOGOTA_TZ)
-        slot = (now.replace(second=0, microsecond=0) - timedelta(minutes=now.minute % 5)).strftime("%H:%M")
-        ya_registrado = any(q.get('Intervalo') == slot for q in st.session_state.queues)
-        if now.minute % 5 == 0 and not ya_registrado:
-            st.markdown(f'<div class="alerta-colas">🚨 REGISTRA LA COLA: Franja {slot} 🚨</div>', unsafe_allow_html=True)
+        current_franja = get_interval_label(now, start_dt)
+        ya_registrado = any(q.get('Franja') == current_franja for q in st.session_state.queues)
+        if not ya_registrado:
+            st.markdown(f'<div class="alerta-colas">🚨 REGISTRA LA COLA: Franja {current_franja} 🚨</div>', unsafe_allow_html=True)
 
-    t1, t2, t3, t4 = st.tabs(["🏃‍♂️ 1. Pedidos y Colas", "🍳 2. Estaciones (Submuestra)", "👥 3. Capacidad Efectiva", "📊 4. Dashboard"])
+    t1, t2, t3, t4 = st.tabs(["🏃‍♂️ 1. Pedidos y Colas", "🍳 2. Estaciones (Submuestra)", "👥 3. Capacidad / Eventos", "📊 4. Dashboard"])
     
     with t1:
         # REGISTRO COLAS
         with st.container(border=True):
-            st.subheader("🚨 Registro de Colas")
+            st.subheader("🚨 Registrar Colas")
             c_qc, c_qa, c_qb = st.columns([1, 1, 1])
-            qc = c_qc.number_input("Caja", 0); qa = c_qa.number_input("AutoMac", 0)
+            qc = c_qc.number_input("Fila Caja", 0); qa = c_qa.number_input("Fila AutoMac", 0)
             if c_qb.button("💾 Guardar Cola", use_container_width=True):
-                inter = (datetime.now(BOGOTA_TZ).replace(second=0, microsecond=0) - timedelta(minutes=datetime.now(BOGOTA_TZ).minute % 5)).strftime("%H:%M")
-                st.session_state.queues.append({"Hora": datetime.now(BOGOTA_TZ).strftime("%H:%M:%S"), "Intervalo": inter, "Caja": qc, "AutoMac": qa})
+                franja_label = get_interval_label(datetime.now(BOGOTA_TZ), start_dt)
+                st.session_state.queues.append({"Hora": datetime.now(BOGOTA_TZ).strftime("%H:%M:%S"), "Franja": franja_label, "Caja": qc, "AutoMac": qa})
                 st.rerun()
             if data['queues']: st.dataframe(pd.DataFrame(data['queues']).iloc[::-1], use_container_width=True)
 
@@ -119,7 +134,7 @@ def render_main_view(data, mode="vivo"):
             n_itm = c2.number_input("Items:", 1, key="nitm")
             if c3.button("▶ Iniciar", type="primary", use_container_width=True):
                 now = datetime.now(BOGOTA_TZ)
-                st.session_state.orders.append({'ID': f"P-{st.session_state.order_counter:03d}", 'Canal': n_can, 'Items': n_itm, 'Estado': 'Ordering', 'Inicio_ts': time.time(), 'Hora Inicio': now.strftime("%H:%M:%S"), 'Inicio': now, 'Fin Ordering': '-', 'Entrega': '-', 'Duración(s)': 0})
+                st.session_state.orders.append({'ID': f"P-{st.session_state.order_counter:03d}", 'Canal': n_can, 'Items': n_itm, 'Estado': 'Ordering', 'Inicio_ts': time.time(), 'Inicio_dt': now, 'Hora Inicio': now.strftime("%H:%M:%S"), 'Fin Ordering': '-', 'Entrega': '-', 'Duración(s)': 0})
                 st.session_state.order_counter += 1; st.rerun()
             
             k1, k2 = st.columns(2)
@@ -134,19 +149,17 @@ def render_main_view(data, mode="vivo"):
                     if st.button(f"✅ Entregar {p['ID']}", key=f"f_{p['ID']}", type="primary", use_container_width=True):
                         p['Estado'] = 'Completado'; p['Entrega'] = datetime.now(BOGOTA_TZ).strftime("%H:%M:%S"); p['Duración(s)'] = round(time.time() - p['Inicio_ts'], 2); st.rerun()
 
-            # TABLA LOG DE PEDIDOS (DEBAJO DE LOS BOTONES)
             if data['orders']:
-                st.write("**Log de Pedidos Finalizados (End-to-End):**")
-                df_ord = pd.DataFrame(data['orders'])
-                comp = df_ord[df_ord['Estado'] == 'Completado'].copy()
+                st.write("**Historial de Pedidos (End-to-End):**")
+                df_o = pd.DataFrame(data['orders'])
+                comp = df_o[df_o['Estado'] == 'Completado'].copy()
                 if not comp.empty:
-                    st.dataframe(comp[['ID', 'Canal', 'Hora Inicio', 'Fin Ordering', 'Entrega', 'Duración(s)']].iloc[::-1], use_container_width=True)
+                    st.dataframe(clean_df(comp).iloc[::-1], use_container_width=True)
 
     with t2:
-        # ESTACIONES
         with st.container(border=True):
-            st.subheader("🍳 Estaciones (Muestreo 10-15)")
-            st.info("Prioridad: Ensamble, Bebidas y Bolseo. Marca 'Listo' si el componente ya estaba en el bin.")
+            st.subheader("🍳 Estaciones (10-15 muestras)")
+            st.info("Prioriza Ensamble, Bebidas y Bolseo. Marca 'Listo' si el componente ya estaba en el bin.")
             ic1, ic2, ic3 = st.columns([2,2,1])
             s_n = ic1.selectbox("Estación:", ["Ensamble", "Bebidas/Postres", "Staging/Bolseo"])
             s_e = ic2.selectbox("Estado:", ["Listo (En bin)", "A pedido (Esperó lote)"])
@@ -162,12 +175,12 @@ def render_main_view(data, mode="vivo"):
             if data['stations']:
                 st.write("**Log de Estaciones:**")
                 df_s = pd.DataFrame(data['stations'])[lambda x: x['Fase'] == 'Completado']
-                if not df_s.empty: st.dataframe(df_s[['ID', 'Estación', 'Estado', 'Hora Inicio', 'Fin', 'Duración(s)', 'Nota']].iloc[::-1], use_container_width=True)
+                if not df_s.empty: st.dataframe(clean_df(df_s).iloc[::-1], use_container_width=True)
 
     with t3:
-        # CAPACIDAD
         with st.container(border=True):
             st.subheader("👥 Capacidad Efectiva")
+            st.info("Registrar al INICIO y en el PICO de congestión.")
             momento = st.radio("Momento:", ["Inicio de Franja", "Pico de Congestión"], horizontal=True)
             c1, c2, c3 = st.columns(3); c4, c5, c6 = st.columns(3)
             p1 = c1.number_input("Parrilla", 0); p2 = c2.number_input("Freidoras", 0); p3 = c3.number_input("Ensamble", 0)
@@ -177,33 +190,35 @@ def render_main_view(data, mode="vivo"):
                 st.session_state.capacity.append({"Hora": datetime.now(BOGOTA_TZ).strftime('%H:%M:%S'), "Momento": momento, "Parrilla": p1, "Freidoras": p2, "Ensamble": p3, "Bebidas": p4, "Bolseo": p5, "Entrega": p6, "Equipos": eq})
                 st.rerun()
             if data['capacity']: st.dataframe(pd.DataFrame(data['capacity']).iloc[::-1], use_container_width=True)
+        
+        with st.container(border=True):
+            st.subheader("⚠️ Eventos")
+            ev = st.text_input("¿Qué ocurrió?")
+            if st.button("💾 Guardar Evento", use_container_width=True):
+                st.session_state.events.append({"Hora": datetime.now(BOGOTA_TZ).strftime('%H:%M:%S'), "Evento": ev}); st.rerun()
+            if data['events']: st.dataframe(pd.DataFrame(data['events']).iloc[::-1], use_container_width=True)
 
     with t4:
-        # DASHBOARD
         st.subheader("📊 Dashboard (Análisis 3.4)")
         if data['orders'] and len(data['orders']) > 0:
             df_ord = pd.DataFrame(data['orders'])
-            df_arr = df_ord[['Canal', 'Inicio']].copy()
-            df_arr['Timestamp'] = pd.to_datetime(df_arr['Inicio'])
-            dem_5m = df_arr.groupby([pd.Grouper(key='Timestamp', freq='5min'), 'Canal']).size().reset_index(name='Pedidos')
+            df_ord['Franja'] = df_ord['Inicio_dt'].apply(lambda x: get_interval_label(x, start_dt))
+            resumen = df_ord.groupby(['Franja', 'Canal']).size().unstack(fill_value=0).reset_index()
             
-            if not dem_5m.empty:
-                resumen = dem_5m.pivot(index='Timestamp', columns='Canal', values='Pedidos').fillna(0).astype(int)
-                for c in ['Caja', 'AutoMac', 'Delivery/Pickup']:
-                    if c not in resumen.columns: resumen[c] = 0
-                
-                fig_df = resumen.reset_index()
-                fig_df['Franja'] = fig_df['Timestamp'].apply(lambda t: f"{t.strftime('%H:%M')} - {(t + timedelta(minutes=5)).strftime('%H:%M')}")
-                
-                # GRÁFICA LIVE
-                st.plotly_chart(px.bar(fig_df.melt(id_vars='Franja', value_vars=['Caja', 'AutoMac', 'Delivery/Pickup']), x='Franja', y='value', color='variable', color_discrete_map=MC_COLORS, barmode='stack', title="Llegadas por Canal (Bloques 5 min)", text_auto=True), use_container_width=True)
-                
-                resumen['Total'] = resumen.sum(axis=1)
-                resumen.index = [f"{t.strftime('%H:%M')} - {(t + timedelta(minutes=5)).strftime('%H:%M')}" for t in resumen.index]
-                st.write("**Tabla Resumen de Demanda:**"); st.dataframe(resumen, use_container_width=True)
-        else: st.info("Inicia un pedido para ver estadísticas.")
+            # Forzar canales para evitar ValueError
+            for c in ['Caja', 'AutoMac', 'Delivery/Pickup']:
+                if c not in resumen.columns: resumen[c] = 0
+            
+            try:
+                fig_df = resumen.melt(id_vars='Franja', value_vars=['Caja', 'AutoMac', 'Delivery/Pickup'])
+                st.plotly_chart(px.bar(fig_df, x='Franja', y='value', color='variable', color_discrete_map=MC_COLORS, barmode='stack', title="Llegadas por Canal (Intervalos de 5 min Reales)", text_auto=True), use_container_width=True)
+            except: st.info("Generando gráfica...")
+            
+            resumen['Total'] = resumen[['Caja', 'AutoMac', 'Delivery/Pickup']].sum(axis=1)
+            st.write("**Tabla de Demanda Detallada:**"); st.dataframe(resumen, use_container_width=True)
+        else: st.info("Registra un pedido para ver estadísticas.")
 
-# --- FLUJO ---
+# --- FLUJO PRINCIPAL ---
 if st.session_state.active_session is None:
     st.title("🍔 McMediciones Pro")
     c1, c2 = st.columns([1, 1.2])
@@ -211,24 +226,25 @@ if st.session_state.active_session is None:
         st.subheader("Nueva Medición")
         obs_n = st.text_input("Observador")
         obs_f = st.date_input("Fecha", datetime.now(BOGOTA_TZ).date())
-        franj = st.selectbox("Franja", ["10:30–12:30", "11:30–14:00", "18:00–21:00", "Otra"])
+        franj = st.selectbox("Franja Horaria", ["10:30–12:30", "11:30–14:00", "18:00–21:00", "Otra"])
         if st.button("▶ EMPEZAR TRABAJO", type="primary", use_container_width=True):
             if obs_n:
-                st.session_state.active_session = {"franja": franj, "observer": obs_n, "fecha": str(obs_f)}
-                st.session_state.orders, st.session_state.queues, st.session_state.stations, st.session_state.capacity = [], [], [], []
+                st.session_state.session_start_time = datetime.now(BOGOTA_TZ)
+                st.session_state.active_session = {"franja": franj, "observer": obs_n, "fecha": str(obs_f), "start_dt": st.session_state.session_start_time}
+                st.session_state.orders, st.session_state.queues, st.session_state.stations, st.session_state.capacity, st.session_state.events = [], [], [], [], []
                 st.rerun()
     with c2:
-        st.subheader("Historial")
+        st.subheader("Historial de Sesiones")
         if st.session_state.history:
             for i, s in enumerate(reversed(st.session_state.history)):
                 with st.container(border=True):
                     st.write(f"**{s['info'].get('fecha', '')} | {s['info']['franja']}**")
-                    st.download_button(f"📥 Descargar Excel {i}", export_excel_maestro(s['data'], s['info']), f"Reporte_{i}.xlsx", key=f"ex_{i}")
+                    st.download_button(f"📥 Descargar Excel Profesional {i}", export_excel_maestro(s['data'], s['info']), f"Reporte_Mc_{i}.xlsx", key=f"ex_{i}")
 
 else:
     h1, h2 = st.columns([4, 1])
     h1.title("Medición en Vivo")
     if h2.button("⏹ FINALIZAR", type="primary"):
-        st.session_state.history.append({"info": st.session_state.active_session, "data": {'orders': list(st.session_state.orders), 'queues': list(st.session_state.queues), 'stations': list(st.session_state.stations), 'capacity': list(st.session_state.capacity)}})
+        st.session_state.history.append({"info": st.session_state.active_session, "data": {'orders': list(st.session_state.orders), 'queues': list(st.session_state.queues), 'stations': list(st.session_state.stations), 'capacity': list(st.session_state.capacity), 'events': list(st.session_state.events)}})
         st.session_state.active_session = None; save_history(); st.rerun()
-    render_main_view({'orders': st.session_state.orders, 'queues': st.session_state.queues, 'stations': st.session_state.stations, 'capacity': st.session_state.capacity}, mode="vivo")
+    render_main_view({'orders': st.session_state.orders, 'queues': st.session_state.queues, 'stations': st.session_state.stations, 'capacity': st.session_state.capacity, 'events': st.session_state.events}, mode="vivo")
