@@ -2,14 +2,21 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 from supabase import create_client, Client
-from datetime import datetime
+from datetime import datetime, timedelta
 import io
-import time
 
 # ==========================================
-# CONFIGURACIÓN INICIAL
+# CONFIGURACIÓN Y ELIMINACIÓN DE BARRA LATERAL
 # ==========================================
 st.set_page_config(page_title="McMediciones", layout="wide", page_icon="🍔")
+
+st.markdown("""
+    <style>
+        [data-testid="collapsedControl"] {display: none;}
+        [data-testid="stSidebar"] {display: none;}
+    </style>
+""", unsafe_allow_html=True)
+
 MC_COLORS = {'Caja': '#DA291C', 'AutoMac': '#FFC72C', 'Delivery/Pickup': '#27251F'}
 
 @st.cache_resource
@@ -19,77 +26,214 @@ def init_connection() -> Client:
 supabase = init_connection()
 
 if 'configurado' not in st.session_state: st.session_state.configurado = False
-if 'pedidos_activos' not in st.session_state: st.session_state.pedidos_activos = {}
-if 'estaciones_activas' not in st.session_state: st.session_state.estaciones_activas = {}
+if 'cronos_e2e' not in st.session_state: st.session_state.cronos_e2e = {}
+if 'cronos_est' not in st.session_state: st.session_state.cronos_est = {}
 
 # ==========================================
-# 1. PANTALLA DE INICIO (LOGIN AISLADO)
+# 1. PANTALLA DE INICIO (LIMPIA)
 # ==========================================
 if not st.session_state.configurado:
-    st.markdown("""<style>[data-testid="stSidebar"] {display: none;}</style>""", unsafe_allow_html=True)
+    st.title("🍔 McMediciones")
+    st.markdown("### Configuración de Turno")
     
-    st.image("https://upload.wikimedia.org/wikipedia/commons/thumb/3/36/McDonald%27s_Golden_Arches.svg/100px-McDonald%27s_Golden_Arches.svg.png")
-    st.title("Bienvenido a McMediciones 🍔")
-    st.markdown("Por favor, configura tu sesión antes de empezar el trabajo de campo.")
-    
-    with st.form("login_form"):
-        col1, col2 = st.columns(2)
-        obs = col1.text_input("👤 Nombre del Observador", placeholder="Ej: Tu Nombre")
-        dia = col2.date_input("📅 Fecha de Medición")
+    with st.container(border=True):
+        obs = st.text_input("👤 Tu Nombre (Observador)", placeholder="Ej: Caro")
+        dia = st.date_input("📅 Fecha")
         franja = st.selectbox("⏱️ Franja de Medición", ["10:30–12:30", "11:30–14:00", "18:00–21:00", "Otra"])
         
-        if st.form_submit_button("Empezar Mediciones 🚀", use_container_width=True):
+        if st.button("🚀 Iniciar Trabajo de Campo", use_container_width=True):
             if obs:
                 st.session_state.obs = obs
                 st.session_state.franja_oficial = f"{dia} | {franja}"
                 st.session_state.configurado = True
                 st.rerun()
             else:
-                st.error("⚠️ Debes ingresar tu nombre para continuar.")
+                st.error("⚠️ Falta tu nombre.")
     st.stop()
 
 # ==========================================
-# 2. BARRA LATERAL (NAVEGACIÓN)
+# 2. MENÚ PRINCIPAL (TABS SUPERIORES)
 # ==========================================
-st.sidebar.image("https://upload.wikimedia.org/wikipedia/commons/thumb/3/36/McDonald%27s_Golden_Arches.svg/100px-McDonald%27s_Golden_Arches.svg.png")
-st.sidebar.title("Menú")
-menu = st.sidebar.radio("Ir a:", ["📊 Dashboard y Reportes", "1️⃣ Pedidos y Tiempos", "2️⃣ Operación Interna"])
-
-st.sidebar.divider()
-st.sidebar.caption("Datos de la sesión:")
-st.sidebar.info(f"👤 **{st.session_state.obs}**\n\n⏱️ {st.session_state.franja_oficial}")
-
-if st.sidebar.button("Cerrar Sesión"):
+c_info, c_salir = st.columns([3, 1])
+c_info.caption(f"👤 **{st.session_state.obs}** | ⏱️ {st.session_state.franja_oficial}")
+if c_salir.button("Cerrar Sesión", size="small"):
     st.session_state.configurado = False
-    st.session_state.pedidos_activos = {}
     st.rerun()
 
-# ==========================================
-# MÓDULO 1: DASHBOARD Y REPORTES (VIVO E HISTORIAL)
-# ==========================================
-if menu == "📊 Dashboard y Reportes":
-    st.title("📈 Centro de Análisis y Reportes")
+tab_fo, tab_int, tab_dash = st.tabs([
+    "🚶‍♂️ Registro de Pedidos", 
+    "🛠️ Operación Interna", 
+    "📊 Dashboard y Exportar"
+])
+
+# ---------------------------------------------------------
+# TAB 1: REGISTRO DE PEDIDOS (E2E + Delivery)
+# ---------------------------------------------------------
+with tab_fo:
+    st.header("Control de Demanda y Tiempos")
     
-    if supabase:
-        # Obtener todas las franjas históricas para el filtro
-        fechas_data = supabase.table('arrivals').select('franja').execute().data
-        todas_franjas = list(set([f['franja'] for f in fechas_data])) if fechas_data else []
-        if st.session_state.franja_oficial not in todas_franjas:
-            todas_franjas.insert(0, st.session_state.franja_oficial)
+    with st.container(border=True):
+        st.subheader("🚨 I. Colas (Alarma 5 min)")
+        qc1, qc2 = st.columns(2)
+        cola_caja_int = qc1.number_input("Fila Caja (Personas)", min_value=0, key="qcaja")
+        cola_auto_int = qc2.number_input("Fila AutoMac (Carros)", min_value=0, key="qauto")
+        if st.button("💾 Guardar Colas", use_container_width=True):
+            if supabase: supabase.table("interval_queues").insert({"franja": st.session_state.franja_oficial, "cola_caja": cola_caja_int, "cola_automac": cola_auto_int, "timestamp": datetime.now().isoformat(), "observer_name": st.session_state.obs}).execute()
+            st.success("¡Colas registradas!")
+
+    with st.container(border=True):
+        st.subheader("👥 II. Llegadas Rápidas (+1)")
+        lc1, lc2, lc3 = st.columns(3)
+        if lc1.button("🚶‍♂️ +1 Caja", use_container_width=True):
+            if supabase: supabase.table("arrivals").insert({"franja": st.session_state.franja_oficial, "channel": "Caja", "timestamp": datetime.now().isoformat(), "observer_name": st.session_state.obs}).execute()
+        if lc2.button("🚗 +1 AutoMac", use_container_width=True):
+            if supabase: supabase.table("arrivals").insert({"franja": st.session_state.franja_oficial, "channel": "AutoMac", "timestamp": datetime.now().isoformat(), "observer_name": st.session_state.obs}).execute()
+        if lc3.button("🛵 +1 Delivery", use_container_width=True):
+            if supabase: supabase.table("arrivals").insert({"franja": st.session_state.franja_oficial, "channel": "Delivery/Pickup", "timestamp": datetime.now().isoformat(), "observer_name": st.session_state.obs}).execute()
+
+    with st.container(border=True):
+        st.subheader("⏱️ III. Medir Tiempo de Pedido")
+        c1, c2 = st.columns(2)
+        nuevo_canal = c1.selectbox("Canal a medir:", ["Caja", "AutoMac", "Delivery/Pickup"])
+        nuevo_items = c2.number_input("Cantidad de Ítems (Tamaño):", min_value=1, value=1)
         
-        col_filtro, col_auto = st.columns([3, 1])
-        franja_seleccionada = col_filtro.selectbox("🔎 Filtrar por Sesión / Historial:", sorted(todas_franjas, reverse=True))
-        auto_refresh = col_auto.toggle("🔄 Auto-Actualizar (Vivo)")
+        if st.button("▶️ Iniciar Reloj", use_container_width=True, type="primary"):
+            pid = f"ORD-{datetime.now().strftime('%H%M%S')}"
+            st.session_state.cronos_e2e[pid] = {"canal": nuevo_canal, "items": nuevo_items, "inicio": datetime.now()}
+            st.rerun()
 
-        # Descargar datos de la base de datos (filtrados)
-        df_arr = pd.DataFrame(supabase.table('arrivals').select('*').eq('franja', franja_seleccionada).execute().data)
-        df_ord = pd.DataFrame(supabase.table('tracked_orders').select('*').eq('franja', franja_seleccionada).execute().data)
-        df_est = pd.DataFrame(supabase.table('station_observations').select('*').eq('franja', franja_seleccionada).execute().data)
+        st.divider()
+        if st.button("🔄 Actualizar Relojes Activos", use_container_width=True): st.rerun()
+        
+        for pid, p in list(st.session_state.cronos_e2e.items()):
+            with st.expander(f"⏳ {p['canal']} ({p['items']} ítems) - Inició: {p['inicio'].strftime('%H:%M:%S')}", expanded=True):
+                t_trans = int((datetime.now() - p['inicio']).total_seconds())
+                st.write(f"Tiempo corriendo: **{t_trans} segundos**")
+                
+                if p['canal'] in ["Caja", "AutoMac"]:
+                    cola_fin = st.number_input("Cola al salir:", min_value=0, key=f"cf_{pid}")
+                    obs_final = "N/A"
+                else:
+                    cola_fin = 0
+                    obs_final = st.selectbox("Observación de espera:", ["Ninguna", "Domiciliario tarde", "Congestión local"], key=f"ob_{pid}")
 
-        tab1, tab2, tab3, tab_pdf = st.tabs(["📉 1. Demanda (5 min)", "📋 2. End-to-End", "⏱️ 3. Estaciones", "📄 Generar Reporte"])
+                if st.button("🛑 Finalizar Pedido", key=f"btn_{pid}"):
+                    dur = int((datetime.now() - p['inicio']).total_seconds())
+                    if supabase: supabase.table("tracked_orders").insert({"franja": st.session_state.franja_oficial, "channel": p['canal'], "size": "N/A", "items_count": p['items'], "cola_inicio": 0, "cola_fin": cola_fin, "observaciones": obs_final, "duration_seconds": dur, "start_time": p['inicio'].isoformat(), "observer_name": st.session_state.obs}).execute()
+                    del st.session_state.cronos_e2e[pid]
+                    st.rerun()
 
-        with tab1:
-            st.subheader(f"Curva de Demanda - {franja_seleccionada}")
+    st.divider()
+    st.subheader("📋 Registro en Vivo (Pedidos)")
+    if supabase:
+        df_live = pd.DataFrame(supabase.table('tracked_orders').select('*').eq('franja', st.session_state.franja_oficial).execute().data)
+        if not df_live.empty:
+            df_live['Hora Inicio'] = pd.to_datetime(df_live['start_time']).dt.strftime('%H:%M:%S')
+            df_live['Hora Fin'] = (pd.to_datetime(df_live['start_time']) + pd.to_timedelta(df_live['duration_seconds'], unit='s')).dt.strftime('%H:%M:%S')
+            df_live['Duración (seg)'] = df_live['duration_seconds']
+            df_live['Canal'] = df_live['channel']
+            df_live['Items'] = df_live['items_count']
+            
+            columnas_mostrar = ['Hora Inicio', 'Hora Fin', 'Canal', 'Items', 'Duración (seg)']
+            st.dataframe(df_live[columnas_mostrar].sort_index(ascending=False), use_container_width=True)
+        else:
+            st.info("Aún no hay pedidos guardados en esta sesión.")
+
+# ---------------------------------------------------------
+# TAB 2: OPERACIÓN INTERNA (ACTUALIZADO A RÚBRICA)
+# ---------------------------------------------------------
+with tab_int:
+    st.header("🛠️ Operación Interna")
+    
+    # IV. ESTACIONES
+    with st.container(border=True):
+        st.subheader("IV. Tiempos por Estación (Submuestra)")
+        sc1, sc2 = st.columns(2)
+        s_nom = sc1.selectbox("Estación observada:", ["Ensamble", "Bebidas/Postres", "Staging/Bolseo", "Parrilla", "Freidoras"])
+        s_est = sc2.selectbox("Estado del componente:", ["Hecho a pedido", "Listo (Ya preparado)"])
+        
+        if st.button("▶️ Iniciar Reloj Estación", use_container_width=True):
+            sid = f"EST-{datetime.now().strftime('%H%M%S')}"
+            st.session_state.cronos_est[sid] = {"est": s_nom, "estado": s_est, "inicio": datetime.now()}
+            st.rerun()
+
+        for sid, s in list(st.session_state.cronos_est.items()):
+            with st.expander(f"🍳 {s['est']} ({s['estado']})", expanded=True):
+                nota_espera = st.text_input("Nota breve si hay espera visible:", key=f"nesp_{sid}")
+                if st.button("🛑 Finalizar Estación", key=f"fbtn_{sid}"):
+                    dur = int((datetime.now() - s['inicio']).total_seconds())
+                    if supabase: supabase.table("station_observations").insert({"franja": st.session_state.franja_oficial, "station": s['est'], "component_state": s['estado'], "nota_espera": nota_espera, "duration_seconds": dur, "start_time": s['inicio'].isoformat(), "observer_name": st.session_state.obs}).execute()
+                    del st.session_state.cronos_est[sid]
+                    st.rerun()
+        
+        # TABLA EN VIVO: ESTACIONES
+        if supabase:
+            df_est_live = pd.DataFrame(supabase.table('station_observations').select('*').eq('franja', st.session_state.franja_oficial).execute().data)
+            if not df_est_live.empty:
+                st.markdown("**📋 Registros guardados:**")
+                df_est_live['Inicio'] = pd.to_datetime(df_est_live['start_time']).dt.strftime('%H:%M:%S')
+                df_est_live.rename(columns={'station': 'Estación', 'component_state': 'Estado', 'duration_seconds': 'Duración(s)', 'nota_espera': 'Nota'}, inplace=True)
+                st.dataframe(df_est_live[['Inicio', 'Estación', 'Estado', 'Duración(s)', 'Nota']].sort_index(ascending=False), use_container_width=True)
+
+    # V. CAPACIDAD EFECTIVA
+    with st.container(border=True):
+        st.subheader("👥 V. Capacidad Efectiva")
+        momento = st.selectbox("Momento del registro:", ["Inicio de Franja", "Pico de Congestión"])
+        zonas = ["Parrilla", "Freidoras", "Ensamble", "Bebidas/Postres", "Staging/Bolseo", "Entrega"]
+        cap_data = {}
+        for z in zonas:
+            zc1, zc2 = st.columns(2)
+            cap_data[f"{z}_p"] = zc1.number_input(f"Pers. en {z}", min_value=0, key=f"p_{z}")
+            cap_data[f"{z}_e"] = zc2.number_input(f"Equipos {z}", min_value=0, key=f"e_{z}")
+        if st.button("💾 Guardar Capacidad", use_container_width=True):
+            if supabase: supabase.table("capacity").insert({"franja": st.session_state.franja_oficial, "momento": momento, "datos": cap_data, "timestamp": datetime.now().isoformat(), "observer_name": st.session_state.obs}).execute()
+            st.success("¡Capacidad guardada!")
+
+        # TABLA EN VIVO: CAPACIDAD
+        if supabase:
+            df_cap_live = pd.DataFrame(supabase.table('capacity').select('*').eq('franja', st.session_state.franja_oficial).execute().data)
+            if not df_cap_live.empty:
+                st.markdown("**📋 Registros guardados:**")
+                df_cap_live['Hora'] = pd.to_datetime(df_cap_live['timestamp']).dt.strftime('%H:%M:%S')
+                df_cap_live.rename(columns={'momento': 'Momento'}, inplace=True)
+                st.dataframe(df_cap_live[['Hora', 'Momento']].sort_index(ascending=False), use_container_width=True)
+
+    # VI. REGISTRO DE EVENTOS
+    with st.container(border=True):
+        st.subheader("⚠️ VI. Registro de Eventos")
+        st.caption("Ej: Reposición de insumos, limpieza rápida, cambios de dotación, fallas.")
+        evento = st.text_input("Tipo de evento y descripción:")
+        if st.button("📝 Guardar Evento", use_container_width=True):
+            if supabase and evento: supabase.table("events").insert({"franja": st.session_state.franja_oficial, "descripcion": evento, "timestamp": datetime.now().isoformat(), "observer_name": st.session_state.obs}).execute()
+            st.success("Evento guardado.")
+
+        # TABLA EN VIVO: EVENTOS
+        if supabase:
+            df_ev_live = pd.DataFrame(supabase.table('events').select('*').eq('franja', st.session_state.franja_oficial).execute().data)
+            if not df_ev_live.empty:
+                st.markdown("**📋 Registros guardados:**")
+                df_ev_live['Hora'] = pd.to_datetime(df_ev_live['timestamp']).dt.strftime('%H:%M:%S')
+                df_ev_live.rename(columns={'descripcion': 'Evento'}, inplace=True)
+                st.dataframe(df_ev_live[['Hora', 'Evento']].sort_index(ascending=False), use_container_width=True)
+
+# ---------------------------------------------------------
+# TAB 3: DASHBOARD Y REPORTES OFICIALES
+# ---------------------------------------------------------
+with tab_dash:
+    st.header("📈 Centro de Análisis y Reportes")
+    
+    if st.button("🔄 Traer Datos Nuevos de la Nube", type="primary", use_container_width=True):
+        st.rerun()
+
+    if supabase:
+        df_arr = pd.DataFrame(supabase.table('arrivals').select('*').eq('franja', st.session_state.franja_oficial).execute().data)
+        df_ord = pd.DataFrame(supabase.table('tracked_orders').select('*').eq('franja', st.session_state.franja_oficial).execute().data)
+        df_est = pd.DataFrame(supabase.table('station_observations').select('*').eq('franja', st.session_state.franja_oficial).execute().data)
+
+        if df_arr.empty and df_ord.empty:
+            st.warning("Aún no hay datos para procesar las gráficas.")
+        else:
+            st.subheader("Curva de Demanda por Canal (Intervalos 5 min)")
             if not df_arr.empty:
                 df_arr['timestamp'] = pd.to_datetime(df_arr['timestamp']).dt.tz_localize(None)
                 dem_5m = df_arr.groupby([pd.Grouper(key='timestamp', freq='5min'), 'channel']).size().reset_index(name='pedidos')
@@ -102,21 +246,7 @@ if menu == "📊 Dashboard y Reportes":
                 total_franja.index = ['TOTAL FRANJA']
                 resumen_final = pd.concat([resumen, total_franja])
                 st.dataframe(resumen_final, use_container_width=True)
-            else:
-                st.info("No hay datos de llegadas en esta sesión.")
 
-        with tab2:
-            st.subheader("Tabla de Pedidos End-to-End")
-            df_clean = pd.DataFrame()
-            if not df_ord.empty:
-                cols = [c for c in ['channel', 'items_count', 'duration_seconds', 'cola_fin', 'observaciones'] if c in df_ord.columns]
-                df_clean = df_ord[cols].copy()
-                df_clean.rename(columns={'channel': 'Canal', 'items_count': 'Tamaño (Items)', 'duration_seconds': 'Tiempo Total (seg)', 'cola_fin': 'Cola Final', 'observaciones': 'Observaciones'}, inplace=True)
-                st.dataframe(df_clean.sort_index(ascending=False), use_container_width=True)
-            else:
-                st.info("No hay pedidos registrados.")
-
-        with tab3:
             st.subheader("Parámetros Estadísticos por Estación")
             params = pd.DataFrame()
             if not df_est.empty:
@@ -127,122 +257,12 @@ if menu == "📊 Dashboard y Reportes":
                 ).reset_index()
                 params.rename(columns={'station': 'Estación', 'component_state': 'Estado/Tipo'}, inplace=True)
                 st.dataframe(params.round(1), use_container_width=True)
-            else:
-                st.info("No hay mediciones de estaciones.")
 
-        with tab_pdf:
-            st.subheader("📄 Reporte Ejecutivo para Exportar")
-            st.markdown(f"**Sesión:** {franja_seleccionada}")
-            st.markdown("---")
-            st.markdown("### Resumen Rápido")
-            col_a, col_b, col_c = st.columns(3)
-            col_a.metric("Total Pedidos Atendidos", len(df_ord))
-            col_b.metric("Llegadas Registradas", len(df_arr))
-            if not df_ord.empty: col_c.metric("Tiempo Promedio (seg)", int(df_ord['duration_seconds'].mean()))
-            st.markdown("---")
-            st.markdown("> 💡 **Para guardar como PDF:** Presiona `Ctrl + P` (o Comando + P en Mac), elige 'Guardar como PDF' y tendrás este documento listo para enviar.")
             st.divider()
-
-        if not df_arr.empty:
+            st.subheader("📂 Reporte Completo de la Sesión")
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                if 'resumen_final' in locals(): resumen_final.to_excel(writer, sheet_name='Demanda')
-                if not df_clean.empty: df_clean.to_excel(writer, sheet_name='End_to_End', index=False)
-                if not params.empty: params.to_excel(writer, sheet_name='Estaciones', index=False)
-            st.download_button("📥 Descargar Todo a Excel (Data Cruda)", output.getvalue(), f"Reporte_{franja_seleccionada}.xlsx", use_container_width=True)
-
-        # Lógica de auto-refresh
-        if auto_refresh:
-            time.sleep(5)
-            st.rerun()
-
-# ==========================================
-# MÓDULO 2: PEDIDOS Y TIEMPOS (CAPTURA)
-# ==========================================
-elif menu == "1️⃣ Pedidos y Tiempos":
-    st.title("📊 Registro de Pedidos Multitarea")
-
-    with st.expander("🚨 Registrar Colas Globales (Cada 5 min)", expanded=False):
-        qc1, qc2 = st.columns(2)
-        cola_caja_int = qc1.number_input("Personas en fila (Caja)", min_value=0, key="qcaja")
-        cola_auto_int = qc2.number_input("Carros en Drive-Thru", min_value=0, key="qauto")
-        if st.button("Guardar Colas Actuales"):
-            if supabase: supabase.table("interval_queues").insert({"franja": st.session_state.franja_oficial, "cola_caja": cola_caja_int, "cola_automac": cola_auto_int, "timestamp": datetime.now().isoformat(), "observer_name": st.session_state.obs}).execute()
-            st.success("Colas guardadas exitosamente.")
-
-    st.divider()
-    st.subheader("➕ Nuevo Pedido")
-    with st.container():
-        c1, c2, c3 = st.columns([2, 1, 1])
-        nuevo_canal = c1.selectbox("Canal del Pedido", ["Caja", "AutoMac", "Delivery/Pickup"], label_visibility="collapsed")
-        nuevo_items = c2.number_input("Cantidad de Ítems", min_value=1, value=1, label_visibility="collapsed")
-        
-        if c3.button("▶️ Iniciar Reloj", use_container_width=True):
-            pid = f"P-{datetime.now().strftime('%H%M%S')}"
-            st.session_state.pedidos_activos[pid] = {"canal": nuevo_canal, "items": nuevo_items, "inicio": datetime.now()}
-            if supabase: supabase.table("arrivals").insert({"franja": st.session_state.franja_oficial, "channel": nuevo_canal, "timestamp": datetime.now().isoformat(), "observer_name": st.session_state.obs}).execute()
-            st.rerun()
-
-    st.divider()
-    c_tit, c_btn = st.columns([3, 1])
-    c_tit.subheader(f"⏱️ Pedidos en curso ({len(st.session_state.pedidos_activos)})")
-    if c_btn.button("🔄 Actualizar Cronómetros", use_container_width=True): st.rerun()
-    
-    if not st.session_state.pedidos_activos:
-        st.info("No hay pedidos en curso.")
-    
-    for pid, p in list(st.session_state.pedidos_activos.items()):
-        with st.container():
-            pc1, pc2, pc3 = st.columns([3, 2, 2])
-            t_trans = int((datetime.now() - p['inicio']).total_seconds())
-            mins, segs = divmod(t_trans, 60)
-            
-            pc1.info(f"**{p['canal']}** ({p['items']} ítems) | Inició: {p['inicio'].strftime('%H:%M:%S')} | ⏳ {mins}m {segs}s")
-            
-            with pc2:
-                if p['canal'] in ["Caja", "AutoMac"]:
-                    cola_fin = st.number_input("Cola al salir:", min_value=0, key=f"cf_{pid}", label_visibility="collapsed")
-                    obs_final = "N/A"
-                else:
-                    cola_fin = 0
-                    obs_final = st.selectbox("Espera:", ["Ninguna", "Leve", "Alta"], key=f"ob_{pid}", label_visibility="collapsed")
-
-            if pc3.button("🛑 Finalizar", key=f"btn_{pid}", use_container_width=True):
-                dur = int((datetime.now() - p['inicio']).total_seconds())
-                if supabase:
-                    supabase.table("tracked_orders").insert({"franja": st.session_state.franja_oficial, "channel": p['canal'], "size": "N/A", "items_count": p['items'], "cola_inicio": 0, "cola_fin": cola_fin, "observaciones": obs_final, "duration_seconds": dur, "start_time": p['inicio'].isoformat(), "observer_name": st.session_state.obs}).execute()
-                del st.session_state.pedidos_activos[pid]
-                st.rerun()
-
-# ==========================================
-# MÓDULO 3: OPERACIÓN INTERNA
-# ==========================================
-elif menu == "2️⃣ Operación Interna":
-    st.title("🛠️ Operación Interna y Cocina")
-
-    c_tit_est, c_btn_est = st.columns([3, 1])
-    c_tit_est.subheader("Tiempos por Estación")
-    if c_btn_est.button("🔄 Actualizar Tiempos"): st.rerun()
-
-    with st.expander("➕ Iniciar Estación", expanded=False):
-        sc1, sc2 = st.columns(2)
-        s_nom = sc1.selectbox("Estación", ["Ensamble", "Bebidas/Postres", "Staging/Bolseo", "Parrilla", "Freidoras"])
-        s_est = sc2.radio("Estado Componente", ["Se preparó al momento", "Ya estaba listo"])
-        if st.button("▶️ Iniciar Reloj Estación"):
-            sid = f"E-{datetime.now().strftime('%H%M%S')}"
-            st.session_state.estaciones_activas[sid] = {"est": s_nom, "estado": s_est, "inicio": datetime.now()}
-            st.rerun()
-
-    for sid, s in list(st.session_state.estaciones_activas.items()):
-        sc1, sc2 = st.columns([2, 1])
-        t_trans = int((datetime.now() - s['inicio']).total_seconds())
-        m_est, s_est_time = divmod(t_trans, 60)
-        
-        sc1.warning(f"**{s['est']}** ({s['estado']}) | Inició: {s['inicio'].strftime('%H:%M:%S')} | ⏳ {m_est}m {s_est_time}s")
-        with sc2:
-            nota_espera = st.selectbox("Espera visible:", ["Ninguna", "Leve", "Alta"], key=f"nesp_{sid}")
-            if st.button("🛑 Finalizar", key=f"fbtn_{sid}"):
-                dur = int((datetime.now() - s['inicio']).total_seconds())
-                if supabase: supabase.table("station_observations").insert({"franja": st.session_state.franja_oficial, "station": s['est'], "component_state": s['estado'], "nota_espera": nota_espera, "duration_seconds": dur, "start_time": s['inicio'].isoformat(), "observer_name": st.session_state.obs}).execute()
-                del st.session_state.estaciones_activas[sid]
-                st.rerun()
+                if 'resumen_final' in locals(): resumen_final.to_excel(writer, sheet_name='Demanda_Curva')
+                if not df_ord.empty: df_ord.to_excel(writer, sheet_name='Pedidos_E2E_Delivery', index=False)
+                if not params.empty: params.to_excel(writer, sheet_name='Estaciones_Resumen', index=False)
+            st.download_button("📥 Descargar Reporte Completo (Excel Maestro)", output.getvalue(), "McMediciones_Reporte_Maestro.xlsx", use_container_width=True, type="primary")
