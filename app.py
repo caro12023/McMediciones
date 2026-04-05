@@ -76,11 +76,21 @@ def export_excel_pro(session_data, session_info):
     
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
         if session_data.get('orders'):
-            df_ord = pd.DataFrame(session_data['orders'])
+            df_ord = pd.DataFrame(session_data['orders']).copy()
             df_ord['Franja'] = df_ord['Inicio_dt'].apply(lambda x: get_interval_label(x, start_dt))
-            ped_int = df_ord.groupby(['Franja', 'Canal']).size().unstack(fill_value=0)
+            
+            # Cálculo blindado para Excel
+            counts_str = df_ord.groupby(['Franja', 'Canal']).size().reset_index(name='Pedidos')
+            ped_int = counts_str.pivot(index='Franja', columns='Canal', values='Pedidos').fillna(0).astype(int)
+            ped_int.columns.name = None
+            for c in ['Caja', 'AutoMac', 'Delivery/Pickup']:
+                if c not in ped_int.columns: ped_int[c] = 0
+            ped_int = ped_int[['Caja', 'AutoMac', 'Delivery/Pickup']]
             ped_int['Total Intervalo'] = ped_int.sum(axis=1)
-            pd.concat([ped_int, pd.DataFrame(ped_int.sum()).T.rename(index={0: 'TOTAL'})]).to_excel(writer, sheet_name='Demanda_Intervalos')
+            
+            tot_row = pd.DataFrame(ped_int.sum()).T
+            tot_row.index = ["TOTAL FRANJA"]
+            pd.concat([ped_int, tot_row]).to_excel(writer, sheet_name='Demanda_Intervalos')
             clean_df_excel(df_ord).to_excel(writer, sheet_name='Detalle_E2E', index=False)
 
         if session_data.get('stations'):
@@ -216,26 +226,36 @@ def render_app_logic(data, mode="vivo"):
     with t4:
         st.subheader("📊 Análisis de Demanda")
         if data['orders'] and len(data['orders']) > 0:
-            df_ord = pd.DataFrame(data['orders'])
+            df_ord = pd.DataFrame(data['orders']).copy()
             
-            # --- SOLUCIÓN DE LA GRÁFICA (EJE X COMO HORA EXACTA) ---
+            # --- 1. LÓGICA DE GRÁFICA INDESTRUCTIBLE (Cuadrícula forzada) ---
             df_ord['Franja_dt'] = df_ord['Inicio_dt'].apply(lambda x: get_franja_dt(x, start_dt))
-            res_dt = df_ord.groupby(['Franja_dt', 'Canal']).size().unstack(fill_value=0).reset_index()
-            for c in ['Caja', 'AutoMac', 'Delivery/Pickup']:
-                if c not in res_dt.columns: res_dt[c] = 0
+            counts = df_ord.groupby(['Franja_dt', 'Canal']).size().reset_index(name='Pedidos')
             
-            fig_df = res_dt.melt(id_vars='Franja_dt', value_vars=['Caja', 'AutoMac', 'Delivery/Pickup'])
-            fig = px.line(fig_df, x='Franja_dt', y='value', color='variable', color_discrete_map=MC_COLORS, markers=True, title="Curva de Demanda por Canal")
-            fig.update_layout(xaxis_title="Hora de Inicio del Bloque", yaxis_title="Pedidos")
+            franjas_unicas = df_ord['Franja_dt'].unique()
+            canales_base = ['Caja', 'AutoMac', 'Delivery/Pickup']
+            
+            # Crear grid perfecto para que Plotly nunca falle
+            grid = pd.MultiIndex.from_product([franjas_unicas, canales_base], names=['Franja_dt', 'Canal']).to_frame(index=False)
+            fig_df = pd.merge(grid, counts, on=['Franja_dt', 'Canal'], how='left').fillna(0)
+            
+            fig = px.line(fig_df, x='Franja_dt', y='Pedidos', color='Canal', color_discrete_map=MC_COLORS, markers=True, title="Curva de Demanda por Canal")
+            fig.update_layout(xaxis_title="Hora de Inicio del Bloque", yaxis_title="Cantidad de Pedidos")
             st.plotly_chart(fig, use_container_width=True)
             
-            # --- TABLA CON FRANJAS EN TEXTO (COMO PIDE LA RÚBRICA) ---
+            # --- 2. LÓGICA DE TABLA DE RÚBRICA (Textos de 5 min) ---
             df_ord['Franja_str'] = df_ord['Inicio_dt'].apply(lambda x: get_interval_label(x, start_dt))
-            res_str = df_ord.groupby(['Franja_str', 'Canal']).size().unstack(fill_value=0)
-            for c in ['Caja', 'AutoMac', 'Delivery/Pickup']:
+            counts_str = df_ord.groupby(['Franja_str', 'Canal']).size().reset_index(name='Pedidos')
+            res_str = counts_str.pivot(index='Franja_str', columns='Canal', values='Pedidos').fillna(0).astype(int)
+            res_str.columns.name = None
+            
+            # Asegurar que existan todos los canales en la tabla
+            for c in canales_base:
                 if c not in res_str.columns: res_str[c] = 0
             
+            res_str = res_str[canales_base]
             res_str['Total Intervalo'] = res_str.sum(axis=1)
+            
             total_franja = pd.DataFrame(res_str.sum()).T
             total_franja.index = ["TOTAL FRANJA"]
             
