@@ -133,7 +133,7 @@ def render_app_logic(data, mode="vivo"):
         if not ya:
             st.markdown(f'<div class="alerta-colas">🚨 REGISTRA LA COLA: {curr_franja} 🚨</div>', unsafe_allow_html=True)
 
-    t1, t2, t3, t4 = st.tabs(["🏃‍♂️ 1. Pedidos y Colas", "🍳 2. Estaciones", "👥 3. Capacidad / Eventos", "📊 4. Dashboard Oficial"])
+    t1, t2, t3, t4 = st.tabs(["🏃‍♂️ 1. Pedidos y Colas", "🍳 2. Estaciones", "👥 3. Capacidad / Eventos", "📊 4. Dashboard"])
 
     with t1:
         c1, c2 = st.columns([1, 2])
@@ -204,11 +204,12 @@ def render_app_logic(data, mode="vivo"):
                     e['Fase'] = 'Completado'; e['Fin'] = datetime.now(BOGOTA_TZ).strftime('%H:%M:%S'); e['Duración(s)'] = round(time.time()-e['Inicio_ts'], 2); e['Nota'] = nt; st.rerun()
 
         if data['stations']:
-            st.write("### Log de Estaciones (Crudo)")
+            st.write("### Log de Estaciones")
             df_s = pd.DataFrame(data['stations'])
             comp_s = df_s[df_s['Fase'] == 'Completado']
             if not comp_s.empty:
-                st.dataframe(clean_df_excel(comp_s[['ID', 'Estación', 'Estado', 'Hora Inicio', 'Fin', 'Duración(s)', 'Nota']]).iloc[::-1], use_container_width=True)
+                # AQUÍ ESTÁ EL CAMBIO: Solo mostramos las columnas útiles en pantalla
+                st.dataframe(comp_s[['ID', 'Estación', 'Estado', 'Duración(s)', 'Nota']].iloc[::-1], use_container_width=True)
 
     with t3:
         st.subheader("👥 Capacidad Efectiva")
@@ -235,7 +236,6 @@ def render_app_logic(data, mode="vivo"):
         if data['orders'] and len(data['orders']) > 0:
             df_ord = pd.DataFrame(data['orders']).copy()
             
-            # Gráfica de línea
             df_ord['Franja_dt'] = df_ord['Inicio_dt'].apply(lambda x: get_franja_dt(x, start_dt))
             counts = df_ord.groupby(['Franja_dt', 'Canal']).size().reset_index(name='Pedidos')
             
@@ -252,7 +252,6 @@ def render_app_logic(data, mode="vivo"):
             except Exception as e:
                 st.warning("Registra un poco más de datos para estabilizar la curva.")
             
-            # Tabla de Rúbrica
             df_ord['Franja_str'] = df_ord['Inicio_dt'].apply(lambda x: get_interval_label(x, start_dt))
             counts_str = df_ord.groupby(['Franja_str', 'Canal']).size().reset_index(name='Pedidos')
             res_str = counts_str.pivot(index='Franja_str', columns='Canal', values='Pedidos').fillna(0).astype(int)
