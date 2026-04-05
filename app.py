@@ -47,14 +47,12 @@ if 'session_start_time' not in st.session_state: st.session_state.session_start_
 
 # --- FUNCIONES DE CÁLCULO DE FRANJAS ---
 def get_franja_dt(timestamp, start_time):
-    """Devuelve la hora exacta de inicio del bloque (Para la Gráfica)"""
     if not start_time: return timestamp
     diff = timestamp - start_time
     intervals = int(diff.total_seconds() // 300)
     return start_time + timedelta(minutes=intervals * 5)
 
 def get_interval_label(timestamp, start_time):
-    """Devuelve el texto del bloque (Para la Tabla)"""
     if not start_time: return "00:00 - 00:05"
     f_start = get_franja_dt(timestamp, start_time)
     f_end = f_start + timedelta(minutes=5)
@@ -79,7 +77,6 @@ def export_excel_pro(session_data, session_info):
             df_ord = pd.DataFrame(session_data['orders']).copy()
             df_ord['Franja'] = df_ord['Inicio_dt'].apply(lambda x: get_interval_label(x, start_dt))
             
-            # Cálculo blindado para Excel
             counts_str = df_ord.groupby(['Franja', 'Canal']).size().reset_index(name='Pedidos')
             ped_int = counts_str.pivot(index='Franja', columns='Canal', values='Pedidos').fillna(0).astype(int)
             ped_int.columns.name = None
@@ -176,12 +173,12 @@ def render_app_logic(data, mode="vivo"):
             if not comp.empty: st.dataframe(clean_df_excel(comp[['ID', 'Canal', 'Items', 'Hora Inicio', 'Fin Ordering', 'Hora Entrega', 'Duración Total(s)']]).iloc[::-1], use_container_width=True)
 
     with t2:
-        st.subheader("🍳 Parámetros por Estación")
+        st.subheader("🍳 Registro de Estaciones (Submuestra)")
         if not readonly:
             ic1, ic2, ic3 = st.columns([2, 2, 1])
             s_n = ic1.selectbox("Estación:", ["Ensamble", "Bebidas/Postres", "Staging/Bolseo"])
             s_e = ic2.selectbox("Estado componente:", ["Listo (En bin)", "A pedido (Esperó)"])
-            if ic3.button("▶ Iniciar", type="primary", use_container_width=True):
+            if ic3.button("▶ Iniciar Medición", type="primary", use_container_width=True):
                 st.session_state.stations.append({'ID': f"E-{len(st.session_state.stations)+1:03d}", 'Estación': s_n, 'Estado': s_e, 'Fase': 'Corriendo', 'Inicio_ts': time.time(), 'Hora Inicio': datetime.now(BOGOTA_TZ).strftime('%H:%M:%S')})
                 st.rerun()
         
@@ -193,15 +190,11 @@ def render_app_logic(data, mode="vivo"):
                     e['Fase'] = 'Completado'; e['Fin'] = datetime.now(BOGOTA_TZ).strftime('%H:%M:%S'); e['Duración(s)'] = round(time.time()-e['Inicio_ts'], 2); e['Nota'] = nt; st.rerun()
 
         if data['stations']:
+            st.write("### Log de Estaciones (Crudo)")
             df_s = pd.DataFrame(data['stations'])
             comp_s = df_s[df_s['Fase'] == 'Completado']
             if not comp_s.empty:
-                st.write("### Tabla de Parámetros (Rúbrica)")
-                params = comp_s.groupby(['Estación', 'Estado'])['Duración(s)'].agg(
-                    n='count', Mediana='median', Min='min', Max='max', 
-                    P10=lambda x: x.quantile(0.10), P90=lambda x: x.quantile(0.90)
-                ).reset_index()
-                st.dataframe(params.round(2), use_container_width=True)
+                st.dataframe(clean_df_excel(comp_s[['ID', 'Estación', 'Estado', 'Hora Inicio', 'Fin', 'Duración(s)', 'Nota']]).iloc[::-1], use_container_width=True)
 
     with t3:
         st.subheader("👥 Capacidad Efectiva")
@@ -228,14 +221,13 @@ def render_app_logic(data, mode="vivo"):
         if data['orders'] and len(data['orders']) > 0:
             df_ord = pd.DataFrame(data['orders']).copy()
             
-            # --- 1. LÓGICA DE GRÁFICA INDESTRUCTIBLE (Cuadrícula forzada) ---
+            # Gráfica de línea
             df_ord['Franja_dt'] = df_ord['Inicio_dt'].apply(lambda x: get_franja_dt(x, start_dt))
             counts = df_ord.groupby(['Franja_dt', 'Canal']).size().reset_index(name='Pedidos')
             
             franjas_unicas = df_ord['Franja_dt'].unique()
             canales_base = ['Caja', 'AutoMac', 'Delivery/Pickup']
             
-            # Crear grid perfecto para que Plotly nunca falle
             grid = pd.MultiIndex.from_product([franjas_unicas, canales_base], names=['Franja_dt', 'Canal']).to_frame(index=False)
             fig_df = pd.merge(grid, counts, on=['Franja_dt', 'Canal'], how='left').fillna(0)
             
@@ -243,16 +235,14 @@ def render_app_logic(data, mode="vivo"):
             fig.update_layout(xaxis_title="Hora de Inicio del Bloque", yaxis_title="Cantidad de Pedidos")
             st.plotly_chart(fig, use_container_width=True)
             
-            # --- 2. LÓGICA DE TABLA DE RÚBRICA (Textos de 5 min) ---
+            # Tabla de Rúbrica
             df_ord['Franja_str'] = df_ord['Inicio_dt'].apply(lambda x: get_interval_label(x, start_dt))
             counts_str = df_ord.groupby(['Franja_str', 'Canal']).size().reset_index(name='Pedidos')
             res_str = counts_str.pivot(index='Franja_str', columns='Canal', values='Pedidos').fillna(0).astype(int)
             res_str.columns.name = None
             
-            # Asegurar que existan todos los canales en la tabla
             for c in canales_base:
                 if c not in res_str.columns: res_str[c] = 0
-            
             res_str = res_str[canales_base]
             res_str['Total Intervalo'] = res_str.sum(axis=1)
             
@@ -262,6 +252,20 @@ def render_app_logic(data, mode="vivo"):
             st.write("### Tabla de Conteos (Rúbrica)")
             st.dataframe(pd.concat([res_str, total_franja]), use_container_width=True)
         else: st.info("Registra pedidos para generar la curva de demanda.")
+
+        st.divider()
+        st.subheader("⏱️ Parámetros Estadísticos por Estación")
+        if data['stations']:
+            df_s = pd.DataFrame(data['stations'])
+            comp_s = df_s[df_s['Fase'] == 'Completado']
+            if not comp_s.empty:
+                params = comp_s.groupby(['Estación', 'Estado'])['Duración(s)'].agg(
+                    n='count', Mediana='median', Min='min', Max='max', 
+                    P10=lambda x: x.quantile(0.10), P90=lambda x: x.quantile(0.90)
+                ).reset_index()
+                st.dataframe(params.round(2), use_container_width=True)
+            else: st.info("Termina al menos una medición de estación para ver el resumen.")
+        else: st.info("No hay registros de estaciones aún.")
 
 # --- FLUJO PRINCIPAL ---
 
