@@ -73,6 +73,19 @@ def export_excel_pro(session_data, session_info):
     start_dt = session_info.get('start_dt')
     
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        workbook = writer.book
+        header_format = workbook.add_format({'bold': True, 'font_color': 'white', 'bg_color': '#DA291C', 'border': 1, 'align': 'center', 'valign': 'vcenter'})
+        cell_format = workbook.add_format({'border': 1, 'align': 'center'})
+        
+        def escribir_y_formatear(df, nombre_hoja):
+            if df.empty: return
+            df.to_excel(writer, sheet_name=nombre_hoja, index=False)
+            worksheet = writer.sheets[nombre_hoja]
+            for col_num, value in enumerate(df.columns.values):
+                worksheet.write(0, col_num, value, header_format)
+                ancho_columna = max(len(str(value)), df[df.columns[col_num]].astype(str).map(len).max()) + 2
+                worksheet.set_column(col_num, col_num, ancho_columna, cell_format)
+
         if session_data.get('orders'):
             df_ord = pd.DataFrame(session_data['orders']).copy()
             df_ord['Franja'] = df_ord['Inicio_dt'].apply(lambda x: get_interval_label(x, start_dt))
@@ -85,10 +98,12 @@ def export_excel_pro(session_data, session_info):
             ped_int = ped_int[['Caja', 'AutoMac', 'Delivery/Pickup']]
             ped_int['Total Intervalo'] = ped_int.sum(axis=1)
             
-            tot_row = pd.DataFrame(ped_int.sum()).T
-            tot_row.index = ["TOTAL FRANJA"]
-            pd.concat([ped_int, tot_row]).to_excel(writer, sheet_name='Demanda_Intervalos')
-            clean_df_excel(df_ord).to_excel(writer, sheet_name='Detalle_E2E', index=False)
+            ped_int_reset = ped_int.reset_index()
+            tot_row = pd.DataFrame(ped_int.sum()).T.reset_index(drop=True)
+            tot_row.insert(0, 'Franja', 'TOTAL FRANJA')
+            
+            escribir_y_formatear(pd.concat([ped_int_reset, tot_row]), 'Demanda_Intervalos')
+            escribir_y_formatear(clean_df_excel(df_ord), 'Detalle_E2E')
 
         if session_data.get('stations'):
             df_s = pd.DataFrame(session_data['stations'])
@@ -98,12 +113,12 @@ def export_excel_pro(session_data, session_info):
                     n='count', Mediana='median', Min='min', Max='max', 
                     P10=lambda x: x.quantile(0.10), P90=lambda x: x.quantile(0.90)
                 ).reset_index()
-                params.round(2).to_excel(writer, sheet_name='Parametros_Estaciones', index=False)
-                clean_df_excel(df_s).to_excel(writer, sheet_name='Estaciones_Crudo', index=False)
+                escribir_y_formatear(params.round(2), 'Parametros_Estaciones')
+                escribir_y_formatear(clean_df_excel(df_s), 'Estaciones_Crudo')
 
-        if session_data.get('queues'): pd.DataFrame(session_data['queues']).to_excel(writer, sheet_name='Colas_5min', index=False)
-        if session_data.get('capacity'): pd.DataFrame(session_data['capacity']).to_excel(writer, sheet_name='Capacidad_Efectiva', index=False)
-        if session_data.get('events'): pd.DataFrame(session_data['events']).to_excel(writer, sheet_name='Eventos_Inusuales', index=False)
+        if session_data.get('queues'): escribir_y_formatear(pd.DataFrame(session_data['queues']), 'Colas_5min')
+        if session_data.get('capacity'): escribir_y_formatear(pd.DataFrame(session_data['capacity']), 'Capacidad_Efectiva')
+        if session_data.get('events'): escribir_y_formatear(pd.DataFrame(session_data['events']), 'Eventos_Inusuales')
 
     return output.getvalue()
 
@@ -111,7 +126,6 @@ def render_app_logic(data, mode="vivo"):
     start_dt = st.session_state.session_start_time if mode == "vivo" else st.session_state.view_session['info']['start_dt']
     readonly = (mode == "consulta")
 
-    # ALERTA DE COLAS INTELIGENTE
     if mode == "vivo" and start_dt:
         now = datetime.now(BOGOTA_TZ)
         curr_franja = get_interval_label(now, start_dt)
@@ -231,9 +245,12 @@ def render_app_logic(data, mode="vivo"):
             grid = pd.MultiIndex.from_product([franjas_unicas, canales_base], names=['Franja_dt', 'Canal']).to_frame(index=False)
             fig_df = pd.merge(grid, counts, on=['Franja_dt', 'Canal'], how='left').fillna(0)
             
-            fig = px.line(fig_df, x='Franja_dt', y='Pedidos', color='Canal', color_discrete_map=MC_COLORS, markers=True, title="Curva de Demanda por Canal")
-            fig.update_layout(xaxis_title="Hora de Inicio del Bloque", yaxis_title="Cantidad de Pedidos")
-            st.plotly_chart(fig, use_container_width=True)
+            try:
+                fig = px.line(fig_df, x='Franja_dt', y='Pedidos', color='Canal', color_discrete_map=MC_COLORS, markers=True, title="Curva de Demanda por Canal")
+                fig.update_layout(xaxis_title="Hora de Inicio del Bloque", yaxis_title="Cantidad de Pedidos")
+                st.plotly_chart(fig, use_container_width=True)
+            except Exception as e:
+                st.warning("Registra un poco más de datos para estabilizar la curva.")
             
             # Tabla de Rúbrica
             df_ord['Franja_str'] = df_ord['Inicio_dt'].apply(lambda x: get_interval_label(x, start_dt))
@@ -268,7 +285,6 @@ def render_app_logic(data, mode="vivo"):
         else: st.info("No hay registros de estaciones aún.")
 
 # --- FLUJO PRINCIPAL ---
-
 if st.session_state.view_session:
     s = st.session_state.view_session
     if st.button("⬅️ VOLVER AL INICIO"): st.session_state.view_session = None; st.rerun()
@@ -277,7 +293,7 @@ if st.session_state.view_session:
     st.download_button("📥 Descargar Excel del Reporte", export_excel_pro(s['data'], s['info']), f"Reporte_{s['info']['fecha']}.xlsx", use_container_width=True)
 
 elif st.session_state.active_session is None:
-    st.title("🍔 McMediciones Pro (Consultoría)")
+    st.title("🍔 McMediciones Pro")
     c1, c2 = st.columns([1, 1.2])
     with c1:
         st.subheader("Nueva Medición")
@@ -295,7 +311,7 @@ elif st.session_state.active_session is None:
         if st.session_state.history:
             for s in reversed(st.session_state.history):
                 with st.container(border=True):
-                    st.write(f"**{s['info'].get('fecha', '')} | {s['info']['franja']}**")
+                    st.write(f"**{s['info'].get('fecha', '')} | {s['info']['franja']}** | {s['info']['observer']}")
                     bc1, bc2, bc3 = st.columns(3)
                     bc1.download_button("💾 Bajar Excel", export_excel_pro(s['data'], s['info']), f"Data_{s['info']['fecha']}.xlsx", key=f"ex_{s['info']['start_dt']}")
                     if bc2.button("📊 Revisar", key=f"v_{s['info']['start_dt']}", use_container_width=True): st.session_state.view_session = s; st.rerun()
