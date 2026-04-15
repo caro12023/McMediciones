@@ -81,7 +81,7 @@ def clean_df_excel(df):
         return pd.DataFrame()
     df = df.copy()
     if 'Fin Ordering' in df.columns: df = df.rename(columns={'Fin Ordering': 'Fin Orden'})
-    for c in ['Inicio_ts', 'Inicio_dt', 'Fase', 'Franja_dt']:
+    for c in ['Inicio_ts', 'Inicio_dt', 'Fase', 'Franja_dt', 'Franja_str']:
         if c in df.columns:
             df = df.drop(columns=[c])
     for col in df.columns:
@@ -200,13 +200,13 @@ def export_master_excel(historial):
         dump_sheet(todos_e, 'Master_Eventos')
         dump_sheet(todas_q, 'Master_Colas')
 
-        # 2. Hoja Resumen: Estadísticas separadas por Fecha y Franja (Con P10 y P90)
+        # 2. Hoja Resumen: Estadísticas separadas por Fecha y Franja
         if df_master_s is not None and not df_master_s.empty:
             params_franja = df_master_s.groupby(['Fecha', 'Franja', 'Estación'])['Duración(s)'].agg(
-                Muestra='count', Media='mean', Mediana='median', Min='min', Max='max',
+                Muestra='count', Media='mean', Mediana='median', Min='min', Max='max', Rango=lambda x: x.max() - x.min(),
                 P10=lambda x: x.quantile(0.10), P90=lambda x: x.quantile(0.90)
             ).reset_index()
-            params_franja.columns = ['Fecha', 'Franja', 'Estación', 'Total Muestra (n)', 'Promedio (s)', 'Mediana (s)', 'Mínimo (s)', 'Máximo (s)', 'Percentil 10', 'Percentil 90']
+            params_franja.columns = ['Fecha', 'Franja', 'Estación', 'Total Muestra (n)', 'Promedio (s)', 'Mediana (s)', 'Mínimo (s)', 'Máximo (s)', 'Rango (s)', 'Percentil 10', 'Percentil 90']
             write_excel_table(writer, params_franja.round(2), 'Master_Estadisticas')
 
     return output.getvalue()
@@ -386,26 +386,23 @@ def render_app_logic(data, mode="vivo"):
             df_ord = pd.DataFrame(data['orders']).copy()
             canales_base = ['Caja', 'AutoMac', 'Delivery/Pickup']
 
-            # --- GRÁFICA INDESTRUCTIBLE ---
-            df_ord['Franja_dt'] = df_ord['Inicio_dt'].apply(lambda x: get_franja_dt(x, start_dt))
-            counts_dt = df_ord.groupby(['Franja_dt', 'Canal']).size().reset_index(name='Pedidos')
+            # --- GRÁFICA CON BLOQUES DE 5 MINUTOS ---
+            df_ord['Franja_str'] = df_ord['Inicio_dt'].apply(lambda x: get_interval_label(x, start_dt))
+            counts_str = df_ord.groupby(['Franja_str', 'Canal']).size().reset_index(name='Pedidos')
             
-            franjas_dt_unicas = df_ord['Franja_dt'].unique()
-            grid_dt = pd.MultiIndex.from_product([franjas_dt_unicas, canales_base], names=['Franja_dt', 'Canal']).to_frame(index=False)
-            fig_df = pd.merge(grid_dt, counts_dt, on=['Franja_dt', 'Canal'], how='left').fillna(0)
-            fig_df = fig_df.sort_values('Franja_dt') 
+            # Garantizamos que aparezcan todos los bloques ordenados sin que se caiga
+            franjas_unicas = sorted(df_ord['Franja_str'].unique())
+            grid_str = pd.MultiIndex.from_product([franjas_unicas, canales_base], names=['Franja_str', 'Canal']).to_frame(index=False)
+            fig_df = pd.merge(grid_str, counts_str, on=['Franja_str', 'Canal'], how='left').fillna(0)
 
             try:
-                fig = px.line(fig_df, x='Franja_dt', y='Pedidos', color='Canal', color_discrete_map=MC_COLORS, markers=True, title="Curva de Demanda por Canal")
-                fig.update_layout(xaxis_title="Hora Exacta", yaxis_title="Cantidad de Pedidos")
+                fig = px.line(fig_df, x='Franja_str', y='Pedidos', color='Canal', color_discrete_map=MC_COLORS, markers=True, title="Curva de Demanda por Canal (Intervalos 5 min)")
+                fig.update_layout(xaxis_title="Franja (Bloques de 5 min)", yaxis_title="Cantidad de Pedidos")
                 st.plotly_chart(fig, use_container_width=True)
             except Exception:
                 st.warning("Registra al menos 2 pedidos en diferentes momentos para trazar la línea.")
 
             # --- TABLA DE BLOQUES DE 5 MINUTOS ---
-            df_ord['Franja_str'] = df_ord['Inicio_dt'].apply(lambda x: get_interval_label(x, start_dt))
-            counts_str = df_ord.groupby(['Franja_str', 'Canal']).size().reset_index(name='Pedidos')
-
             res_str = counts_str.pivot(index='Franja_str', columns='Canal', values='Pedidos').fillna(0).astype(int)
             res_str.columns.name = None
             for c in canales_base:
@@ -431,12 +428,10 @@ def render_app_logic(data, mode="vivo"):
             df_s = pd.DataFrame(data['stations'])
             comp_s = df_s[df_s['Fase'] == 'Completado']
             if not comp_s.empty:
-                # --- AGREGADOS P10 Y P90 COMO PEDISTE ---
                 params = comp_s.groupby(['Estación'])['Duración(s)'].agg(
-                    Muestra='count', Media='mean', Mediana='median', Min='min', Max='max',
+                    Muestra='count', Media='mean', Mediana='median', Min='min', Max='max', Rango=lambda x: x.max() - x.min(),
                     P10=lambda x: x.quantile(0.10), P90=lambda x: x.quantile(0.90)
                 ).reset_index()
-                
                 df_stat = params.round(2)
                 st.dataframe(df_stat, use_container_width=True)
                 if readonly:
