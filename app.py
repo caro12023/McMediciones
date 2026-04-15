@@ -9,7 +9,7 @@ import pickle
 import os
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="McMediciones Oficial", layout="wide", page_icon="🍔")
+st.set_page_config(page_title="McMediciones General", layout="wide", page_icon="🍔")
 BOGOTA_TZ = pytz.timezone('America/Bogota')
 HISTORY_FILE = "mcmediciones_history.pkl"
 MC_COLORS = {'Caja': '#DA291C', 'AutoMac': '#FFC72C', 'Delivery/Pickup': '#27251F'}
@@ -80,6 +80,7 @@ def clean_df_excel(df):
     if df is None or df.empty:
         return pd.DataFrame()
     df = df.copy()
+    if 'Fin Ordering' in df.columns: df = df.rename(columns={'Fin Ordering': 'Fin Orden'})
     for c in ['Inicio_ts', 'Inicio_dt', 'Fase', 'Franja_dt']:
         if c in df.columns:
             df = df.drop(columns=[c])
@@ -88,27 +89,27 @@ def clean_df_excel(df):
             df[col] = df[col].dt.tz_localize(None)
     return df
 
+def write_excel_table(writer, df, sheet_name):
+    if df is None or df.empty: return
+    df.to_excel(writer, sheet_name=sheet_name, index=False, header=False, startrow=1)
+    worksheet = writer.sheets[sheet_name]
+    (max_row, max_col) = df.shape
+    column_settings = [{'header': str(c)} for c in df.columns]
+    
+    worksheet.add_table(0, 0, max_row, max_col - 1, {
+        'columns': column_settings,
+        'style': 'Table Style Medium 15'
+    })
+    
+    for i, col in enumerate(df.columns):
+        width = max(len(str(col)), df[col].astype(str).map(len).max() if not df[col].empty else 0) + 2
+        worksheet.set_column(i, i, min(width, 35))
+
 def export_excel_pro(session_data, session_info):
     output = io.BytesIO()
     start_dt = session_info.get('start_dt')
 
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        workbook = writer.book
-        header_format = workbook.add_format({
-            'bold': True, 'font_color': 'white', 'bg_color': '#DA291C',
-            'border': 1, 'align': 'center', 'valign': 'vcenter'
-        })
-        cell_format = workbook.add_format({'border': 1, 'align': 'center'})
-
-        def escribir_y_formatear(df, nombre_hoja):
-            if df.empty: return
-            df.to_excel(writer, sheet_name=nombre_hoja, index=False)
-            worksheet = writer.sheets[nombre_hoja]
-            for col_num, value in enumerate(df.columns.values):
-                worksheet.write(0, col_num, value, header_format)
-                ancho_columna = max(len(str(value)), df[df.columns[col_num]].astype(str).map(len).max()) + 2
-                worksheet.set_column(col_num, col_num, ancho_columna, cell_format)
-
         if session_data.get('orders'):
             df_ord = pd.DataFrame(session_data['orders']).copy()
             df_ord['Franja'] = df_ord['Inicio_dt'].apply(lambda x: get_interval_label(x, start_dt))
@@ -125,8 +126,8 @@ def export_excel_pro(session_data, session_info):
             tot_row = pd.DataFrame(ped_int.sum()).T.reset_index(drop=True)
             tot_row.insert(0, 'Franja', 'TOTAL FRANJA')
 
-            escribir_y_formatear(pd.concat([ped_int_reset, tot_row]), 'Demanda_Intervalos')
-            escribir_y_formatear(clean_df_excel(df_ord), 'Detalle_E2E')
+            write_excel_table(writer, pd.concat([ped_int_reset, tot_row]), 'Demanda_Intervalos')
+            write_excel_table(writer, clean_df_excel(df_ord), 'Detalle_E2E')
 
         if session_data.get('stations'):
             df_s = pd.DataFrame(session_data['stations'])
@@ -137,48 +138,70 @@ def export_excel_pro(session_data, session_info):
                     Min='min', Max='max', P10=lambda x: x.quantile(0.10), P90=lambda x: x.quantile(0.90)
                 ).reset_index()
 
-                escribir_y_formatear(params.round(2), 'Parametros_Estaciones')
-                escribir_y_formatear(clean_df_excel(df_s), 'Estaciones_Crudo')
+                write_excel_table(writer, params.round(2), 'Parametros_Estaciones')
+                write_excel_table(writer, clean_df_excel(df_s), 'Estaciones_Crudo')
 
         if session_data.get('queues'):
-            escribir_y_formatear(pd.DataFrame(session_data['queues']), 'Colas_5min')
+            write_excel_table(writer, pd.DataFrame(session_data['queues']), 'Colas_5min')
         if session_data.get('capacity'):
-            escribir_y_formatear(pd.DataFrame(session_data['capacity']), 'Capacidad_Efectiva')
+            write_excel_table(writer, pd.DataFrame(session_data['capacity']), 'Capacidad_Efectiva')
         if session_data.get('events'):
-            escribir_y_formatear(pd.DataFrame(session_data['events']), 'Eventos_Inusuales')
+            write_excel_table(writer, pd.DataFrame(session_data['events']), 'Eventos_Inusuales')
 
     return output.getvalue()
 
 def export_master_excel(historial):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-        todas_ordenes = []
-        todas_estaciones = []
+        todas_o, todas_s, todas_c, todos_e, todas_q = [], [], [], [], []
 
         for s in historial:
             franja = s['info'].get('franja', 'Sin Franja')
             fecha = s['info'].get('fecha', 'Sin Fecha')
+            start_dt = s['info'].get('start_dt')
 
-            if s['data'].get('orders'):
-                df_o = pd.DataFrame(s['data']['orders']).copy()
-                df_o.insert(0, 'Franja Evaluación', franja)
-                df_o.insert(0, 'Fecha', fecha)
-                todas_ordenes.append(df_o)
-            
-            if s['data'].get('stations'):
-                df_e = pd.DataFrame(s['data']['stations']).copy()
-                df_e = df_e[df_e['Fase'] == 'Completado']
-                df_e.insert(0, 'Franja Evaluación', franja)
-                df_e.insert(0, 'Fecha', fecha)
-                todas_estaciones.append(df_e)
+            def tag(k):
+                if s['data'].get(k):
+                    df = pd.DataFrame(s['data'][k]).copy()
+                    if k == 'stations': df = df[df['Fase'] == 'Completado']
+                    
+                    if 'Franja' in df.columns: df = df.drop(columns=['Franja'])
+                    if 'Fecha' in df.columns: df = df.drop(columns=['Fecha'])
+                    
+                    df.insert(0, 'Franja', franja)
+                    df.insert(0, 'Fecha', fecha)
+                    return df
+                return None
 
-        if todas_ordenes:
-            df_final_o = clean_df_excel(pd.concat(todas_ordenes, ignore_index=True))
-            df_final_o.to_excel(writer, sheet_name='Master_Pedidos', index=False)
-        
-        if todas_estaciones:
-            df_final_e = clean_df_excel(pd.concat(todas_estaciones, ignore_index=True))
-            df_final_e.to_excel(writer, sheet_name='Master_Estaciones', index=False)
+            do = tag('orders'); ds = tag('stations'); dc = tag('capacity'); de = tag('events'); dq = tag('queues')
+            if do is not None: todas_o.append(do)
+            if ds is not None: todas_s.append(ds)
+            if dc is not None: todas_c.append(dc)
+            if de is not None: todos_e.append(de)
+            if dq is not None: todas_q.append(dq)
+
+        def dump_sheet(lista, name):
+            if lista:
+                df_final = clean_df_excel(pd.concat(lista, ignore_index=True))
+                write_excel_table(writer, df_final, name)
+                return df_final
+            return None
+
+        # 1. Hojas Crudas
+        dump_sheet(todas_o, 'Master_Pedidos')
+        df_master_s = dump_sheet(todas_s, 'Master_Estaciones')
+        dump_sheet(todas_c, 'Master_Capacidad')
+        dump_sheet(todos_e, 'Master_Eventos')
+        dump_sheet(todas_q, 'Master_Colas')
+
+        # 2. Hoja Resumen: Estadísticas separadas por Fecha y Franja
+        if df_master_s is not None and not df_master_s.empty:
+            params_franja = df_master_s.groupby(['Fecha', 'Franja', 'Estación'])['Duración(s)'].agg(
+                Muestra='count', Media='mean', Mediana='median', Min='min', Max='max'
+            ).reset_index()
+            # Encabezados impecables para el profesor
+            params_franja.columns = ['Fecha', 'Franja', 'Estación', 'Total Muestra (n)', 'Promedio (s)', 'Mediana (s)', 'Mínimo (s)', 'Máximo (s)']
+            write_excel_table(writer, params_franja.round(2), 'Master_Estadisticas')
 
     return output.getvalue()
 
@@ -257,7 +280,7 @@ def render_app_logic(data, mode="vivo"):
 
     with t2:
         st.subheader("🍳 Shadowing Secuencial (Rastreo de Pedido)")
-        st.info("💡 Sigue un pedido. Registra las observaciones generales únicamente al finalizar en Bolseo.")
+        st.info("💡 Sigue un pedido en vivo. Registra observaciones al finalizar en Bolseo.")
 
         if not readonly and st.button("➕ Iniciar Nuevo Rastreo", type="primary"):
             st.session_state.shadow_counter += 1
@@ -271,7 +294,6 @@ def render_app_logic(data, mode="vivo"):
             with st.container(border=True):
                 st.markdown(f"### 🍔 {s['id']} (Cocina: {time.time() - s['inicio_global']:.0f}s)")
 
-                # FASE 1: ENSAMBLE (Sin notas, solo botón)
                 if s['fase_actual'] == 'Ensamble':
                     st.markdown("#### 📍 Fase 1: Ensamble")
                     if st.button("Siguiente ➡️ (A Bolseo)", key=f"b_ens_{s['id']}"):
@@ -283,7 +305,6 @@ def render_app_logic(data, mode="vivo"):
                         s['inicio_fase'] = time.time()
                         st.rerun()
 
-                # FASE 2: STAGING / BOLSEO (Con notas)
                 elif s['fase_actual'] == 'Staging/Bolseo':
                     st.markdown("#### 📍 Fase 2: Staging / Bolseo")
                     nota = st.text_input("Observaciones generales del pedido (opcional):", key=f"n_bol_{s['id']}")
@@ -338,10 +359,28 @@ def render_app_logic(data, mode="vivo"):
         st.subheader("📊 Análisis de Demanda")
         if data['orders'] and len(data['orders']) > 0:
             df_ord = pd.DataFrame(data['orders']).copy()
+            canales_base = ['Caja', 'AutoMac', 'Delivery/Pickup']
+
+            # --- GRÁFICA INDESTRUCTIBLE ---
+            df_ord['Franja_dt'] = df_ord['Inicio_dt'].apply(lambda x: get_franja_dt(x, start_dt))
+            counts_dt = df_ord.groupby(['Franja_dt', 'Canal']).size().reset_index(name='Pedidos')
+            
+            franjas_dt_unicas = df_ord['Franja_dt'].unique()
+            grid_dt = pd.MultiIndex.from_product([franjas_dt_unicas, canales_base], names=['Franja_dt', 'Canal']).to_frame(index=False)
+            fig_df = pd.merge(grid_dt, counts_dt, on=['Franja_dt', 'Canal'], how='left').fillna(0)
+            fig_df = fig_df.sort_values('Franja_dt') 
+
+            try:
+                fig = px.line(fig_df, x='Franja_dt', y='Pedidos', color='Canal', color_discrete_map=MC_COLORS, markers=True, title="Curva de Demanda por Canal")
+                fig.update_layout(xaxis_title="Hora Exacta", yaxis_title="Cantidad de Pedidos")
+                st.plotly_chart(fig, use_container_width=True)
+            except Exception:
+                st.warning("Registra al menos 2 pedidos en diferentes momentos para trazar la línea.")
+
+            # --- TABLA DE BLOQUES DE 5 MINUTOS ---
             df_ord['Franja_str'] = df_ord['Inicio_dt'].apply(lambda x: get_interval_label(x, start_dt))
             counts_str = df_ord.groupby(['Franja_str', 'Canal']).size().reset_index(name='Pedidos')
 
-            canales_base = ['Caja', 'AutoMac', 'Delivery/Pickup']
             res_str = counts_str.pivot(index='Franja_str', columns='Canal', values='Pedidos').fillna(0).astype(int)
             res_str.columns.name = None
             for c in canales_base:
@@ -352,21 +391,10 @@ def render_app_logic(data, mode="vivo"):
             total_franja = pd.DataFrame(res_str.sum()).T
             total_franja.index = ["TOTAL FRANJA"]
 
-            franjas_unicas = df_ord['Franja_str'].unique()
-            grid = pd.MultiIndex.from_product([franjas_unicas, canales_base], names=['Franja_str', 'Canal']).to_frame(index=False)
-            fig_df = pd.merge(grid, counts_str, on=['Franja_str', 'Canal'], how='left').fillna(0)
-
-            try:
-                fig = px.line(fig_df, x='Franja_str', y='Pedidos', color='Canal', color_discrete_map=MC_COLORS, markers=True, title="Curva de Demanda por Canal")
-                fig.update_layout(xaxis_title="Franja Horaria", yaxis_title="Cantidad de Pedidos")
-                st.plotly_chart(fig, use_container_width=True)
-            except Exception:
-                st.warning("Registra un poco más de datos para estabilizar la curva.")
-
-            st.write("### Tabla de Conteos")
+            st.write("### Tabla de Conteos (Bloques de 5 minutos)")
             st.dataframe(pd.concat([res_str, total_franja]), use_container_width=True)
         else:
-            st.info("Registra pedidos para generar la curva de demanda.")
+            st.info("Registra pedidos para generar la gráfica y la tabla de demanda.")
 
         st.divider()
         st.subheader("⏱️ Parámetros Estadísticos por Estación")
@@ -375,8 +403,7 @@ def render_app_logic(data, mode="vivo"):
             comp_s = df_s[df_s['Fase'] == 'Completado']
             if not comp_s.empty:
                 params = comp_s.groupby(['Estación'])['Duración(s)'].agg(
-                    Muestra='count', Media='mean', Mediana='median', Min='min', Max='max', 
-                    P10=lambda x: x.quantile(0.10), P90=lambda x: x.quantile(0.90)
+                    Muestra='count', Media='mean', Mediana='median', Min='min', Max='max'
                 ).reset_index()
                 st.dataframe(params.round(2), use_container_width=True)
             else:
@@ -395,7 +422,7 @@ if st.session_state.view_session:
     render_app_logic(s['data'], mode="consulta")
 
 elif st.session_state.active_session is None:
-    st.title("🍔 McMediciones Pro")
+    st.title("🍔 McMediciones General")
     c1, c2 = st.columns([1, 1.2])
 
     with c1:
@@ -405,7 +432,9 @@ elif st.session_state.active_session is None:
         franj = st.selectbox("Franja Horaria", ["10:30–12:30", "11:30–14:00", "18:00–21:00", "Otra"])
 
         if st.button("▶ INICIAR TRABAJO", type="primary", use_container_width=True):
-            if obs_n:
+            if not obs_n.strip():
+                st.error("⚠️ ¡Alto ahí! Debes ingresar un 'Observador' (usuario) para poder iniciar la sesión.")
+            else:
                 st.session_state.session_start_time = datetime.now(BOGOTA_TZ)
                 st.session_state.active_session = {
                     "franja": franj, "observer": obs_n, "fecha": str(obs_f), "start_dt": st.session_state.session_start_time
@@ -421,7 +450,6 @@ elif st.session_state.active_session is None:
         st.subheader("Historial de Sesiones")
         
         if st.session_state.history:
-            # --- EL BOTÓN MASTER GIGANTE ---
             st.download_button(
                 label="📊 DESCARGAR BASE DE DATOS MASTER (Todas las Franjas)",
                 data=export_master_excel(st.session_state.history),
