@@ -105,6 +105,13 @@ def write_excel_table(writer, df, sheet_name):
         width = max(len(str(col)), df[col].astype(str).map(len).max() if not df[col].empty else 0) + 2
         worksheet.set_column(i, i, min(width, 35))
 
+# --- NUEVA FUNCIÓN PARA DESCARGAS INDIVIDUALES ---
+def get_single_excel(df, sheet_name):
+    output = io.BytesIO()
+    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+        write_excel_table(writer, df, sheet_name)
+    return output.getvalue()
+
 def export_excel_pro(session_data, session_info):
     output = io.BytesIO()
     start_dt = session_info.get('start_dt')
@@ -232,7 +239,11 @@ def render_app_logic(data, mode="vivo"):
                 })
                 st.rerun()
         with c2:
-            if data['queues']: st.dataframe(pd.DataFrame(data['queues']).iloc[::-1], use_container_width=True)
+            if data['queues']: 
+                df_q = pd.DataFrame(data['queues']).iloc[::-1]
+                st.dataframe(df_q, use_container_width=True)
+                if readonly:
+                    st.download_button("⬇️ Descargar Colas", data=get_single_excel(df_q, "Colas"), file_name="Colas.xlsx", key="dl_q")
 
         st.divider()
         st.subheader("➕ Pedidos End-to-End")
@@ -276,7 +287,10 @@ def render_app_logic(data, mode="vivo"):
             df_o = pd.DataFrame(data['orders'])
             comp = df_o[df_o['Estado'] == 'Completado']
             if not comp.empty:
-                st.dataframe(clean_df_excel(comp[['ID', 'Canal', 'Items', 'Hora Inicio', 'Fin Ordering', 'Hora Entrega', 'Duración Total(s)']]).iloc[::-1], use_container_width=True)
+                df_clean_o = clean_df_excel(comp[['ID', 'Canal', 'Items', 'Hora Inicio', 'Fin Ordering', 'Hora Entrega', 'Duración Total(s)']]).iloc[::-1]
+                st.dataframe(df_clean_o, use_container_width=True)
+                if readonly:
+                    st.download_button("⬇️ Descargar Pedidos", data=get_single_excel(df_clean_o, "Pedidos"), file_name="Pedidos.xlsx", key="dl_o")
 
     with t2:
         st.subheader("🍳 Shadowing Secuencial (Rastreo de Pedido)")
@@ -322,7 +336,10 @@ def render_app_logic(data, mode="vivo"):
             comp_s = df_s[df_s['Fase'] == 'Completado'].copy()
             if not comp_s.empty:
                 if 'Ticket' not in comp_s.columns: comp_s['Ticket'] = "N/A"
-                st.dataframe(comp_s[['Ticket', 'Estación', 'Duración(s)', 'Nota']].iloc[::-1], use_container_width=True)
+                df_clean_s = comp_s[['Ticket', 'Estación', 'Duración(s)', 'Nota']].iloc[::-1]
+                st.dataframe(df_clean_s, use_container_width=True)
+                if readonly:
+                    st.download_button("⬇️ Descargar Estaciones", data=get_single_excel(df_clean_s, "Estaciones"), file_name="Estaciones.xlsx", key="dl_s")
 
     with t3:
         st.subheader("👥 Capacidad Efectiva")
@@ -345,7 +362,11 @@ def render_app_logic(data, mode="vivo"):
                 })
                 st.rerun()
 
-        if data['capacity']: st.dataframe(pd.DataFrame(data['capacity']).iloc[::-1], use_container_width=True)
+        if data['capacity']: 
+            df_c = pd.DataFrame(data['capacity']).iloc[::-1]
+            st.dataframe(df_c, use_container_width=True)
+            if readonly:
+                st.download_button("⬇️ Descargar Capacidad", data=get_single_excel(df_c, "Capacidad"), file_name="Capacidad.xlsx", key="dl_c")
 
         st.divider()
         st.subheader("⚠️ Eventos Inusuales")
@@ -353,7 +374,12 @@ def render_app_logic(data, mode="vivo"):
         if not readonly and st.button("💾 Guardar Evento"):
             st.session_state.events.append({"Hora": datetime.now(BOGOTA_TZ).strftime('%H:%M:%S'), "Evento": ev_msg})
             st.rerun()
-        if data['events']: st.dataframe(pd.DataFrame(data['events']).iloc[::-1], use_container_width=True)
+            
+        if data['events']: 
+            df_e = pd.DataFrame(data['events']).iloc[::-1]
+            st.dataframe(df_e, use_container_width=True)
+            if readonly:
+                st.download_button("⬇️ Descargar Eventos", data=get_single_excel(df_e, "Eventos"), file_name="Eventos.xlsx", key="dl_e")
 
     with t4:
         st.subheader("📊 Análisis de Demanda")
@@ -392,7 +418,11 @@ def render_app_logic(data, mode="vivo"):
             total_franja.index = ["TOTAL FRANJA"]
 
             st.write("### Tabla de Conteos (Bloques de 5 minutos)")
-            st.dataframe(pd.concat([res_str, total_franja]), use_container_width=True)
+            df_dem = pd.concat([res_str, total_franja])
+            st.dataframe(df_dem, use_container_width=True)
+            if readonly:
+                df_dem_dl = df_dem.reset_index().rename(columns={'index': 'Franja / Total'})
+                st.download_button("⬇️ Descargar Demanda", data=get_single_excel(df_dem_dl, "Demanda"), file_name="Demanda.xlsx", key="dl_dem")
         else:
             st.info("Registra pedidos para generar la gráfica y la tabla de demanda.")
 
@@ -405,7 +435,10 @@ def render_app_logic(data, mode="vivo"):
                 params = comp_s.groupby(['Estación'])['Duración(s)'].agg(
                     Muestra='count', Media='mean', Mediana='median', Min='min', Max='max'
                 ).reset_index()
-                st.dataframe(params.round(2), use_container_width=True)
+                df_stat = params.round(2)
+                st.dataframe(df_stat, use_container_width=True)
+                if readonly:
+                    st.download_button("⬇️ Descargar Estadísticas", data=get_single_excel(df_stat, "Estadisticas"), file_name="Estadisticas.xlsx", key="dl_stat")
             else:
                 st.info("Termina al menos una medición para ver el resumen.")
         else:
