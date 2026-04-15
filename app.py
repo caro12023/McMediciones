@@ -257,7 +257,7 @@ def render_app_logic(data, mode="vivo"):
 
     with t2:
         st.subheader("🍳 Shadowing Secuencial (Rastreo de Pedido)")
-        st.info("💡 Sigue un pedido en vivo. Puedes saltar bebidas si el pedido no tiene.")
+        st.info("💡 Sigue un pedido. Registra las observaciones generales únicamente al finalizar en Bolseo.")
 
         if not readonly and st.button("➕ Iniciar Nuevo Rastreo", type="primary"):
             st.session_state.shadow_counter += 1
@@ -271,40 +271,22 @@ def render_app_logic(data, mode="vivo"):
             with st.container(border=True):
                 st.markdown(f"### 🍔 {s['id']} (Cocina: {time.time() - s['inicio_global']:.0f}s)")
 
+                # FASE 1: ENSAMBLE (Sin notas, solo botón)
                 if s['fase_actual'] == 'Ensamble':
                     st.markdown("#### 📍 Fase 1: Ensamble")
-                    nota = st.text_input("Observaciones (opcional):", key=f"n_ens_{s['id']}")
-                    if st.button("Siguiente ➡️ (A Bebidas)", key=f"b_ens_{s['id']}"):
+                    if st.button("Siguiente ➡️ (A Bolseo)", key=f"b_ens_{s['id']}"):
                         st.session_state.stations.append({
                             'ID': f"E-{len(st.session_state.stations)+1:03d}", 'Ticket': s['id'], 
-                            'Estación': 'Ensamble', 'Fase': 'Completado', 'Duración(s)': round(time.time() - s['inicio_fase'], 2), 'Nota': nota
+                            'Estación': 'Ensamble', 'Fase': 'Completado', 'Duración(s)': round(time.time() - s['inicio_fase'], 2), 'Nota': '-'
                         })
-                        s['fase_actual'] = 'Bebidas/Postres'
+                        s['fase_actual'] = 'Staging/Bolseo'
                         s['inicio_fase'] = time.time()
                         st.rerun()
 
-                elif s['fase_actual'] == 'Bebidas/Postres':
-                    st.markdown("#### 📍 Fase 2: Bebidas y Postres")
-                    tiene_bebida = st.checkbox("🥤 ¿Lleva bebida, helado o postre?", value=True, key=f"chk_{s['id']}")
-                    if tiene_bebida:
-                        nota = st.text_input("Observaciones (opcional):", key=f"n_beb_{s['id']}")
-                        if st.button("Siguiente ➡️ (A Bolseo)", key=f"b_beb_{s['id']}"):
-                            st.session_state.stations.append({
-                                'ID': f"E-{len(st.session_state.stations)+1:03d}", 'Ticket': s['id'], 
-                                'Estación': 'Bebidas/Postres', 'Fase': 'Completado', 'Duración(s)': round(time.time() - s['inicio_fase'], 2), 'Nota': nota
-                            })
-                            s['fase_actual'] = 'Staging/Bolseo'
-                            s['inicio_fase'] = time.time()
-                            st.rerun()
-                    else:
-                        st.info("⏭️ Sin bebidas. Pasa directo a bolseo.")
-                        if st.button("Saltar estación ➡️", key=f"b_skip_{s['id']}"):
-                            s['fase_actual'] = 'Staging/Bolseo'
-                            st.rerun()
-
+                # FASE 2: STAGING / BOLSEO (Con notas)
                 elif s['fase_actual'] == 'Staging/Bolseo':
-                    st.markdown("#### 📍 Fase 3: Staging / Bolseo")
-                    nota = st.text_input("Observaciones finales:", key=f"n_bol_{s['id']}")
+                    st.markdown("#### 📍 Fase 2: Staging / Bolseo")
+                    nota = st.text_input("Observaciones generales del pedido (opcional):", key=f"n_bol_{s['id']}")
                     if st.button("✅ Finalizar Rastreo", type="primary", key=f"b_bol_{s['id']}"):
                         st.session_state.stations.append({
                             'ID': f"E-{len(st.session_state.stations)+1:03d}", 'Ticket': s['id'], 
