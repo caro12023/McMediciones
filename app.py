@@ -105,7 +105,6 @@ def write_excel_table(writer, df, sheet_name):
         width = max(len(str(col)), df[col].astype(str).map(len).max() if not df[col].empty else 0) + 2
         worksheet.set_column(i, i, min(width, 35))
 
-# --- NUEVA FUNCIÓN PARA DESCARGAS INDIVIDUALES ---
 def get_single_excel(df, sheet_name):
     output = io.BytesIO()
     with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
@@ -201,13 +200,13 @@ def export_master_excel(historial):
         dump_sheet(todos_e, 'Master_Eventos')
         dump_sheet(todas_q, 'Master_Colas')
 
-        # 2. Hoja Resumen: Estadísticas separadas por Fecha y Franja
+        # 2. Hoja Resumen: Estadísticas separadas por Fecha y Franja (Con P10 y P90)
         if df_master_s is not None and not df_master_s.empty:
             params_franja = df_master_s.groupby(['Fecha', 'Franja', 'Estación'])['Duración(s)'].agg(
-                Muestra='count', Media='mean', Mediana='median', Min='min', Max='max'
+                Muestra='count', Media='mean', Mediana='median', Min='min', Max='max',
+                P10=lambda x: x.quantile(0.10), P90=lambda x: x.quantile(0.90)
             ).reset_index()
-            # Encabezados impecables para el profesor
-            params_franja.columns = ['Fecha', 'Franja', 'Estación', 'Total Muestra (n)', 'Promedio (s)', 'Mediana (s)', 'Mínimo (s)', 'Máximo (s)']
+            params_franja.columns = ['Fecha', 'Franja', 'Estación', 'Total Muestra (n)', 'Promedio (s)', 'Mediana (s)', 'Mínimo (s)', 'Máximo (s)', 'Percentil 10', 'Percentil 90']
             write_excel_table(writer, params_franja.round(2), 'Master_Estadisticas')
 
     return output.getvalue()
@@ -432,9 +431,12 @@ def render_app_logic(data, mode="vivo"):
             df_s = pd.DataFrame(data['stations'])
             comp_s = df_s[df_s['Fase'] == 'Completado']
             if not comp_s.empty:
+                # --- AGREGADOS P10 Y P90 COMO PEDISTE ---
                 params = comp_s.groupby(['Estación'])['Duración(s)'].agg(
-                    Muestra='count', Media='mean', Mediana='median', Min='min', Max='max'
+                    Muestra='count', Media='mean', Mediana='median', Min='min', Max='max',
+                    P10=lambda x: x.quantile(0.10), P90=lambda x: x.quantile(0.90)
                 ).reset_index()
+                
                 df_stat = params.round(2)
                 st.dataframe(df_stat, use_container_width=True)
                 if readonly:
@@ -451,7 +453,7 @@ if st.session_state.view_session:
         st.session_state.view_session = None
         st.rerun()
 
-    st.title(f"📂 Revisando: {s['info']['franja']}")
+    st.title(f"📂 Revisando Histórico: {s['info']['franja']} (Obs: {s['info'].get('observer', 'N/A')})")
     render_app_logic(s['data'], mode="consulta")
 
 elif st.session_state.active_session is None:
